@@ -1,0 +1,16 @@
+# Agent-work runtime artifacts may contain prompts, source context, costs, and local paths.
+.agent-work/
+
+# Local credentials and dependencies
+.env
+.env.*
+!.env.example
+node_modules/
+
+# OS/editor artifacts
+.DS_Store
+*.swp
+
+# Local evaluation harness files
+AGENTS.md
+TESTPLAN.md

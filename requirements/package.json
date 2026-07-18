@@ -1,0 +1,13 @@
+{
+  "name": "pi-agent-work-requirements",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic requirements interviewer CLI for pi-agent-work",
+  "bin": {
+    "req": "./src/cli.ts"
+  },
+  "scripts": {
+    "req": "node --experimental-strip-types src/cli.ts"
+  }
+}

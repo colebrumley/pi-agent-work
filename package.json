@@ -1,0 +1,23 @@
+{
+  "name": "pi-agent-work",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Durable, file-backed subagent orchestration for Pi",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "scripts": {
+    "test": "node --experimental-strip-types extensions/agent-work/router.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions/agent-work/index.ts"],
+    "prompts": ["./prompts"],
+    "skills": ["./skills"]
+  }
+}

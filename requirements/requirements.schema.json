@@ -1,0 +1,213 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/colebrumley/pi-agent-work/blob/main/requirements/requirements.schema.json",
+  "title": "Requirements State",
+  "description": "Canonical contract for the deterministic requirements store. requirements.json conforms to this minus `decisions`; decision-log.json holds { decisions: Decision[] }. The CLI ships a dependency-free structural mirror of this schema; this file is the source of truth for external validators (ajv, check-jsonschema).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "featureName", "problemStatement", "tier",
+    "goals", "nonGoals", "actors", "userJourneys",
+    "functionalRequirements", "nonFunctionalRequirements", "constraints",
+    "assumptions", "risks", "openQuestions", "acceptanceCriteria",
+    "outOfScope", "dependencies", "rollout", "observability", "security",
+    "operational", "riskReviews", "handoffNotes", "meta"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "featureName": { "type": "string", "minLength": 1 },
+    "problemStatement": { "type": "string" },
+    "tier": { "enum": ["tiny", "small", "medium", "large", "epic"] },
+    "goals": { "type": "array", "items": { "$ref": "#/$defs/namedItem" } },
+    "nonGoals": { "type": "array", "items": { "$ref": "#/$defs/namedItem" } },
+    "outOfScope": { "type": "array", "items": { "$ref": "#/$defs/namedItem" } },
+    "actors": { "type": "array", "items": { "$ref": "#/$defs/actor" } },
+    "userJourneys": { "type": "array", "items": { "$ref": "#/$defs/userJourney" } },
+    "functionalRequirements": { "type": "array", "items": { "$ref": "#/$defs/requirement" } },
+    "nonFunctionalRequirements": { "type": "array", "items": { "$ref": "#/$defs/requirement" } },
+    "constraints": { "type": "array", "items": { "$ref": "#/$defs/constraint" } },
+    "assumptions": { "type": "array", "items": { "$ref": "#/$defs/assumption" } },
+    "risks": { "type": "array", "items": { "$ref": "#/$defs/risk" } },
+    "openQuestions": { "type": "array", "items": { "$ref": "#/$defs/openQuestion" } },
+    "acceptanceCriteria": { "type": "array", "items": { "$ref": "#/$defs/acceptanceCriterion" } },
+    "dependencies": { "type": "array", "items": { "$ref": "#/$defs/dependency" } },
+    "decisions": { "type": "array", "items": { "$ref": "#/$defs/decision" } },
+    "rollout": { "$ref": "#/$defs/rolloutSection" },
+    "observability": { "$ref": "#/$defs/optionalSection" },
+    "security": { "$ref": "#/$defs/optionalSection" },
+    "operational": { "$ref": "#/$defs/optionalSection" },
+    "riskReviews": { "type": "array", "items": { "$ref": "#/$defs/riskReview" } },
+    "handoffNotes": { "type": "array", "items": { "type": "string" } },
+    "meta": {
+      "type": "object",
+      "required": ["createdAt", "updatedAt", "decisionSequence"],
+      "properties": {
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "decisionSequence": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "$defs": {
+    "namedItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text"],
+      "properties": { "id": { "type": "string" }, "text": { "type": "string" } }
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
+    "userJourney": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "steps"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "actor": { "type": "string" },
+        "steps": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text", "priority"],
+      "properties": {
+        "id": { "type": "string" },
+        "text": { "type": "string" },
+        "priority": { "enum": ["must", "should", "could"] },
+        "rationale": { "type": "string" }
+      }
+    },
+    "constraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text"],
+      "properties": {
+        "id": { "type": "string" },
+        "text": { "type": "string" },
+        "kind": { "enum": ["technical", "business", "legal", "ux", "other"] }
+      }
+    },
+    "assumption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "text": { "type": "string" },
+        "status": { "enum": ["proposed", "confirmed", "rejected", "accepted-risk"] },
+        "rationale": { "type": "string" }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "decision", "status", "alternatives", "source", "confidence", "relatedRequirements", "sequence", "timestamp"],
+      "properties": {
+        "id": { "type": "string" },
+        "decision": { "type": "string" },
+        "status": { "enum": ["proposed", "confirmed", "rejected", "deferred"] },
+        "rationale": { "type": "string" },
+        "alternatives": { "type": "array", "items": { "type": "string" } },
+        "source": { "enum": ["user", "interviewer", "inferred", "existing-doc"] },
+        "confidence": { "enum": ["low", "medium", "high"] },
+        "relatedRequirements": { "type": "array", "items": { "type": "string" } },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "timestamp": { "type": "string" }
+      }
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text", "likelihood", "impact", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "text": { "type": "string" },
+        "likelihood": { "enum": ["low", "medium", "high"] },
+        "impact": { "enum": ["low", "medium", "high"] },
+        "mitigation": { "type": "string" },
+        "status": { "enum": ["open", "mitigated", "accepted"] }
+      }
+    },
+    "openQuestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "question", "category", "whyItMatters", "blocking", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "question": { "type": "string" },
+        "category": { "type": "string" },
+        "whyItMatters": { "type": "string" },
+        "blocking": { "enum": ["blocking", "non-blocking", "optional"] },
+        "possibleDefault": { "type": "string" },
+        "status": { "enum": ["open", "answered", "deferred", "accepted-risk"] },
+        "linked": { "type": "string" }
+      }
+    },
+    "acceptanceCriterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "criterion", "testability", "priority"],
+      "properties": {
+        "id": { "type": "string" },
+        "criterion": { "type": "string" },
+        "linkedGoal": { "type": "string" },
+        "linkedRequirement": { "type": "string" },
+        "testability": { "enum": ["testable", "manual", "unclear"] },
+        "priority": { "enum": ["must", "should", "could"] }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "kind", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "kind": { "enum": ["internal", "external", "team", "service", "data", "other"] },
+        "status": { "enum": ["available", "pending", "at-risk", "unknown"] },
+        "notes": { "type": "string" }
+      }
+    },
+    "optionalSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["applicable", "notes"],
+      "properties": {
+        "applicable": { "type": "boolean" },
+        "notApplicableReason": { "type": "string" },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "rolloutSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["applicable", "notes", "phases"],
+      "properties": {
+        "applicable": { "type": "boolean" },
+        "notApplicableReason": { "type": "string" },
+        "notes": { "type": "array", "items": { "type": "string" } },
+        "phases": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "riskReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reviewedAt", "reviewer", "summary"],
+      "properties": {
+        "reviewedAt": { "type": "string" },
+        "reviewer": { "type": "string" },
+        "summary": { "type": "string" }
+      }
+    }
+  }
+}

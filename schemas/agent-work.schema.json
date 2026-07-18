@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/pi-agent-work/v1",
+  "title": "Pi agent-work artifacts",
+  "oneOf": [
+    { "$ref": "#/$defs/feature" },
+    { "$ref": "#/$defs/manifest" },
+    { "$ref": "#/$defs/task" },
+    { "$ref": "#/$defs/status" },
+    { "$ref": "#/$defs/current" },
+    { "$ref": "#/$defs/invocation" },
+    { "$ref": "#/$defs/route" },
+    { "$ref": "#/$defs/session" },
+    { "$ref": "#/$defs/handoff" }
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "properties": { "schemaVersion": { "const": 1 } },
+      "required": ["schemaVersion"]
+    },
+    "manifest": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["features", "createdAt", "updatedAt"],
+          "properties": {
+            "features": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "createdAt": { "type": "string", "format": "date-time" }, "updatedAt": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    },
+    "feature": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["id", "title", "goal", "acceptanceCriteria", "constraints", "state", "createdAt", "updatedAt"],
+          "properties": {
+            "id": { "type": "string" }, "title": { "type": "string" }, "goal": { "type": "string" },
+            "acceptanceCriteria": { "type": "array", "items": { "type": "string" } },
+            "constraints": { "type": "array", "items": { "type": "string" } },
+            "state": { "enum": ["active", "done", "cancelled"] },
+            "createdAt": { "type": "string", "format": "date-time" }, "updatedAt": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    },
+    "task": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["id", "featureId", "title", "prompt", "mode", "profile", "dependsOn", "createdAt"],
+          "properties": {
+            "id": { "type": "string" }, "featureId": { "type": "string" }, "title": { "type": "string" }, "prompt": { "type": "string" },
+            "mode": { "enum": ["read", "write"] }, "profile": { "type": "string" },
+            "dependsOn": { "type": "array", "items": { "type": "string" } }, "createdAt": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    },
+    "status": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["featureId", "taskId", "state", "currentAttempt", "updatedAt"],
+          "properties": {
+            "featureId": { "type": "string" }, "taskId": { "type": "string" },
+            "state": { "enum": ["pending", "running", "review", "done", "blocked", "failed", "cancelled", "integrated"] },
+            "currentAttempt": { "type": "integer", "minimum": 0 }, "commit": { "type": "string" }, "branch": { "type": "string" },
+            "worktree": { "type": "string" }, "message": { "type": "string" }, "updatedAt": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    },
+    "current": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["attempt", "path", "updatedAt"],
+          "properties": {
+            "attempt": { "type": "integer", "minimum": 0 },
+            "path": { "type": ["string", "null"] },
+            "updatedAt": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    },
+    "invocation": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["featureId", "taskId", "attempt", "profile", "mode", "cwd", "command", "args", "startedAt"],
+          "properties": {
+            "featureId": { "type": "string" }, "taskId": { "type": "string" }, "attempt": { "type": "integer", "minimum": 1 },
+            "profile": { "type": "string" }, "mode": { "enum": ["read", "write"] }, "cwd": { "type": "string" },
+            "command": { "type": "string" }, "args": { "type": "array", "items": { "type": "string" } },
+            "model": { "type": "string" }, "thinking": { "type": "string" }, "route": { "$ref": "#/$defs/route" },
+            "startedAt": { "type": "string", "format": "date-time" }, "completedAt": { "type": "string", "format": "date-time" },
+            "durationMs": { "type": "integer", "minimum": 0 }, "usage": { "$ref": "#/$defs/usage" }, "exitCode": { "type": "integer" }
+          }
+        }
+      ]
+    },
+    "usage": {
+      "type": "object",
+      "required": ["input", "output", "cacheRead", "cacheWrite", "cost", "turns"],
+      "properties": {
+        "input": { "type": "number", "minimum": 0 }, "output": { "type": "number", "minimum": 0 },
+        "cacheRead": { "type": "number", "minimum": 0 }, "cacheWrite": { "type": "number", "minimum": 0 },
+        "cost": { "type": "number", "minimum": 0 }, "turns": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "route": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["timestamp", "source", "classification", "requiredQuality", "reason", "candidates"],
+          "properties": {
+            "timestamp": { "type": "string", "format": "date-time" }, "selectedModel": { "type": "string" }, "thinking": { "type": "string" },
+            "source": { "enum": ["router", "explicit", "pi-default"] }, "requiredQuality": { "type": "number", "minimum": 0, "maximum": 1 },
+            "reason": { "type": "string" }, "classification": { "type": "object" }, "candidates": { "type": "array" }
+          }
+        }
+      ]
+    },
+    "session": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["eventsFile", "cwd", "updatedAt"],
+          "properties": {
+            "id": { "type": "string" }, "file": { "type": "string" }, "eventsFile": { "type": "string" },
+            "cwd": { "type": "string" }, "updatedAt": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    },
+    "handoff": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["featureId", "taskId", "attempt", "status", "summary", "changedFiles", "checks", "decisions", "risks", "blockers", "nextSteps", "session", "createdAt"],
+          "properties": {
+            "featureId": { "type": "string" }, "taskId": { "type": "string" }, "attempt": { "type": "integer", "minimum": 1 },
+            "status": { "enum": ["done", "blocked", "failed"] }, "summary": { "type": "string" },
+            "changedFiles": { "type": "array", "items": { "type": "object", "required": ["path", "summary"], "properties": { "path": { "type": "string" }, "summary": { "type": "string" } } } },
+            "checks": { "type": "array", "items": { "type": "object", "required": ["command", "status"], "properties": { "command": { "type": "string" }, "status": { "enum": ["passed", "failed", "not-run"] }, "exitCode": { "type": "integer" }, "evidence": { "type": "string" } } } },
+            "decisions": { "type": "array", "items": { "type": "object", "required": ["decision", "rationale"], "properties": { "decision": { "type": "string" }, "rationale": { "type": "string" } } } },
+            "risks": { "type": "array", "items": { "type": "string" } }, "blockers": { "type": "array", "items": { "type": "string" } },
+            "nextSteps": { "type": "array", "items": { "type": "string" } },
+            "session": { "type": "object", "required": ["eventsFile"], "properties": { "id": { "type": "string" }, "file": { "type": "string" }, "eventsFile": { "type": "string" } } },
+            "createdAt": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    }
+  }
+}
