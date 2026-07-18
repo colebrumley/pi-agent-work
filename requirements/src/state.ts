@@ -23,9 +23,15 @@ import type {
   RequirementsState,
   Decision,
   Tier,
+  ReadinessAssessment,
+  ReadinessOptOut,
+  TestingStandards,
+  TestException,
 } from "./types.ts";
-import { SCHEMA_VERSION } from "./types.ts";
+import { ADVERSARIAL_CATEGORIES, FIDELITY_LAYERS, READINESS_DOMAINS, SCHEMA_VERSION } from "./types.ts";
 import { validateSchema } from "./validate-requirements.ts";
+import { requirementsRevision } from "./revision.ts";
+export { requirementsRevision } from "./revision.ts";
 
 export const REQUIREMENTS_FILE = "requirements.json";
 export const DECISION_LOG_FILE = "decision-log.json";
@@ -38,9 +44,27 @@ function emptySection() {
   return { applicable: true, notes: [] as string[] };
 }
 
+function emptyReadiness(): ReadinessAssessment {
+  return {
+    buildableEndToEnd: "unanswered",
+    rationale: "",
+    workingParameters: "",
+    assumptions: [],
+    stopConditions: [],
+    domains: READINESS_DOMAINS.map((domain) => ({ domain, status: "open", rationale: "" })),
+  };
+}
+
+function emptyTestingStandards(): TestingStandards {
+  return {
+    fidelity: FIDELITY_LAYERS.map((name) => ({ name, applicable: false, rationale: "" })),
+    adversarial: ADVERSARIAL_CATEGORIES.map((name) => ({ name, applicable: false, rationale: "" })),
+  };
+}
+
 export function newState(featureName: string, tier: Tier): RequirementsState {
   const ts = nowIso();
-  return {
+  const state: RequirementsState = {
     schemaVersion: SCHEMA_VERSION,
     featureName,
     problemStatement: "",
@@ -56,6 +80,11 @@ export function newState(featureName: string, tier: Tier): RequirementsState {
     risks: [],
     openQuestions: [],
     acceptanceCriteria: [],
+    acceptanceTests: [],
+    testingStandards: emptyTestingStandards(),
+    testExceptions: [],
+    readiness: emptyReadiness(),
+    requirementsRevision: "",
     outOfScope: [],
     dependencies: [],
     rollout: { ...emptySection(), phases: [] },
@@ -67,6 +96,8 @@ export function newState(featureName: string, tier: Tier): RequirementsState {
     decisions: [],
     meta: { createdAt: ts, updatedAt: ts, decisionSequence: 0 },
   };
+  state.requirementsRevision = requirementsRevision(state);
+  return state;
 }
 
 /** Collections that support id-keyed upsert/remove. */
@@ -82,6 +113,7 @@ const COLLECTIONS = [
   "risks",
   "openQuestions",
   "acceptanceCriteria",
+  "acceptanceTests",
   "outOfScope",
   "dependencies",
   "decisions",
@@ -101,6 +133,7 @@ const ID_PREFIX: Record<CollectionKey, string> = {
   risks: "risk",
   openQuestions: "q",
   acceptanceCriteria: "ac",
+  acceptanceTests: "at",
   outOfScope: "oos",
   dependencies: "dep",
   decisions: "dec",
@@ -121,6 +154,10 @@ export interface Patch {
   sections?: Partial<Record<(typeof SECTION_KEYS)[number], any>>;
   riskReviews?: any[]; // appended
   handoffNotes?: string[]; // replaces the array when present
+  readiness?: Partial<ReadinessAssessment>;
+  readinessOptOut?: ReadinessOptOut | null;
+  testingStandards?: TestingStandards;
+  testExceptions?: TestException[];
 }
 
 function nextId(existing: { id?: string }[], prefix: string): string {
@@ -191,8 +228,14 @@ export function applyPatch(
   }
 
   if (patch.handoffNotes) next.handoffNotes = patch.handoffNotes.slice();
+  if (patch.readiness) next.readiness = { ...next.readiness, ...structuredClone(patch.readiness) };
+  if (patch.readinessOptOut === null) delete next.readinessOptOut;
+  else if (patch.readinessOptOut) next.readinessOptOut = structuredClone(patch.readinessOptOut);
+  if (patch.testingStandards) next.testingStandards = structuredClone(patch.testingStandards);
+  if (patch.testExceptions) next.testExceptions = structuredClone(patch.testExceptions);
 
   next.meta.updatedAt = nowIso();
+  next.requirementsRevision = requirementsRevision(next);
   return next;
 }
 
@@ -255,6 +298,23 @@ function parseJsonFile(path: string): any {
  * ever persists schema-valid state, structural failure here means the file was
  * hand-edited or written by another version — the user must fix it.
  */
+export function migrateState(raw: any, decisions: Decision[] = []): RequirementsState {
+  if (raw?.schemaVersion === SCHEMA_VERSION) return { ...raw, decisions } as RequirementsState;
+  if (raw?.schemaVersion !== 1) throw new Error(`Unsupported requirements schemaVersion ${raw?.schemaVersion}`);
+  const migrated = {
+    ...raw,
+    schemaVersion: SCHEMA_VERSION,
+    decisions,
+    acceptanceTests: [],
+    testingStandards: emptyTestingStandards(),
+    testExceptions: [],
+    readiness: emptyReadiness(),
+    requirementsRevision: "",
+  } as RequirementsState;
+  migrated.requirementsRevision = requirementsRevision(migrated);
+  return migrated;
+}
+
 export function loadState(dir: string): RequirementsState {
   const p = statePaths(dir);
   if (!existsSync(p.requirements))
@@ -262,12 +322,7 @@ export function loadState(dir: string): RequirementsState {
   const reqRaw = parseJsonFile(p.requirements);
   const decisionFile = existsSync(p.decisionLog) ? parseJsonFile(p.decisionLog) : {};
   const decisions = decisionFile?.decisions ?? [];
-  const state = { ...reqRaw, decisions } as RequirementsState;
-
-  if (reqRaw?.schemaVersion !== undefined && reqRaw.schemaVersion !== SCHEMA_VERSION)
-    throw new Error(
-      `${REQUIREMENTS_FILE} has schemaVersion ${reqRaw.schemaVersion}, but this tool expects ${SCHEMA_VERSION}. Migrate or recreate the session.`
-    );
+  const state = migrateState(reqRaw, decisions);
 
   const schemaIssues = validateSchema(state);
   if (schemaIssues.length)
@@ -301,6 +356,7 @@ function atomicWrite(path: string, data: string): void {
  */
 export function saveState(dir: string, state: RequirementsState): void {
   const p = statePaths(dir);
+  state.requirementsRevision = requirementsRevision(state);
   const { decisions, ...rest } = state;
   atomicWrite(p.requirements, JSON.stringify(rest, null, 2) + "\n");
   atomicWrite(p.decisionLog, JSON.stringify({ decisions }, null, 2) + "\n");

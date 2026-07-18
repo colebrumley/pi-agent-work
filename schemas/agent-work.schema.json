@@ -12,7 +12,9 @@
     { "$ref": "#/$defs/route" },
     { "$ref": "#/$defs/session" },
     { "$ref": "#/$defs/handoff" },
-    { "$ref": "#/$defs/progress" }
+    { "$ref": "#/$defs/progress" },
+    { "$ref": "#/$defs/builderEvidence" },
+    { "$ref": "#/$defs/verificationReport" }
   ],
   "$defs": {
     "base": {
@@ -170,6 +172,26 @@
           }
         }
       ]
+    },
+    "builderEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "requirementsRevision", "implementationCommit", "tests"],
+      "properties": {
+        "schemaVersion": { "const": 2 }, "requirementsRevision": { "type": "string" }, "implementationCommit": { "type": "string" },
+        "tests": { "type": "array", "items": { "type": "object", "required": ["testId", "command", "result", "environment", "scenarios", "summary"], "properties": {
+          "testId": { "type": "string" }, "command": { "type": "string" }, "result": { "enum": ["passed", "failed", "not-run"] }, "environment": { "type": "string" },
+          "scenarios": { "type": "array", "items": { "enum": ["happy-path", "boundaries", "malformed-input", "failure-recovery", "regression", "abuse"] } }, "summary": { "type": "string", "maxLength": 4000 },
+          "artifact": { "type": "object", "required": ["path", "sha256"], "properties": { "path": { "type": "string" }, "sha256": { "type": "string" } } }
+        } } }
+      }
+    },
+    "verificationReport": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "requirementsRevision", "reviewedCommit", "generatedAt", "tests", "findings", "evidenceComplete", "approved"],
+      "properties": {
+        "schemaVersion": { "const": 2 }, "requirementsRevision": { "type": "string" }, "reviewedCommit": { "type": "string" }, "generatedAt": { "type": "string", "format": "date-time" },
+        "evidenceComplete": { "type": "boolean" }, "approved": { "type": "boolean" }, "tests": { "type": "array" }, "findings": { "type": "array" }
+      }
     },
     "handoff": {
       "allOf": [

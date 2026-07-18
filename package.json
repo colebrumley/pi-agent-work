@@ -7,7 +7,7 @@
   "keywords": ["pi-package"],
   "license": "MIT",
   "scripts": {
-    "test": "node --experimental-strip-types extensions/agent-work/router.test.ts && node --experimental-strip-types extensions/agent-work/policy.test.ts && node --experimental-strip-types extensions/agent-work/questionnaire.test.ts && node --experimental-strip-types extensions/agent-work/progress.test.ts"
+    "test": "node --experimental-strip-types extensions/agent-work/router.test.ts && node --experimental-strip-types extensions/agent-work/policy.test.ts && node --experimental-strip-types extensions/agent-work/questionnaire.test.ts && node --experimental-strip-types extensions/agent-work/progress.test.ts && node --experimental-strip-types requirements/src/rigorous-gates.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

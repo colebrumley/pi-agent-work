@@ -15,7 +15,8 @@
  *   defer <questionId> [--dir d]          mark a blocking question deferred
  *   accept-risk <questionId> [--dir d]    mark a question accepted as risk
  *   render-spec [--dir d] [--out f]       render the human requirements spec
- *   render-handoff [--dir d] [--out f] [--force]   render the builder handoff
+ *   migrate [--dir d]                     persist deterministic schema-v1 → v2 migration
+ *   render-handoff [--dir d] [--out f] [--force]   render (force is compatibility-only; no implicit bypass)
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -87,6 +88,14 @@ switch (cmd) {
       fail("requirements.json / decision-log.json already exist here (use --force to overwrite)");
     saveState(dir, newState(feature, tier));
     console.log(`Initialized ${tier} requirements session for "${feature}" in ${dir}`);
+    break;
+  }
+
+  case "migrate": {
+    const dir = dirOf(args);
+    const state = loadState(dir);
+    saveState(dir, state);
+    console.log(`Requirements state is schema v${state.schemaVersion}; readiness remains fail-closed until explicitly completed.`);
     break;
   }
 
@@ -171,6 +180,13 @@ switch (cmd) {
     const q = state.openQuestions.find((x) => x.id === qid);
     if (!q) fail(`no open question with id "${qid}"`);
     q!.status = cmd === "defer" ? "deferred" : "accepted-risk";
+    if (cmd === "accept-risk") {
+      const assumption = args.flags.assumption as string;
+      const stop = args.flags["stop-condition"] as string;
+      if (!assumption || !stop) fail("accept-risk requires --assumption <text> and --stop-condition <text>");
+      q!.acceptedRiskAssumption = assumption;
+      q!.stopCondition = stop;
+    }
     saveState(dir, state);
     console.log(`Question ${qid} marked ${q!.status}.`);
     break;
@@ -193,7 +209,7 @@ switch (cmd) {
       console.error("Handoff withheld — state is not ready:");
       printIssues("Errors", result.report.errors);
       printIssues("Unresolved blockers", result.report.blockers.filter((b) => !result.report.errors.includes(b)));
-      console.error("\nResolve these, or re-run with --force to emit a risk-flagged handoff.");
+      console.error("\nResolve these. Tiny/small opt-out requires an explicit user-approved readinessOptOut record; --force never invents approval.");
       process.exit(1);
     }
     if (args.flags.out) {
@@ -209,13 +225,14 @@ switch (cmd) {
 
 Commands:
   init <feature> [--tier t]      create a new requirements session
+  migrate                        persist schema-v1 state as incomplete schema v2
   validate                       structural + completeness validation
   gaps [--json]                  deterministic gap report (feeds questions)
   blockers                       unresolved items blocking handoff
   apply <patch.json>             apply a structured update, then validate
   decisions                      show the decision log
   defer <questionId>             mark a blocking question deferred
-  accept-risk <questionId>       mark a question accepted as risk
+  accept-risk <questionId> --assumption <text> --stop-condition <text>
   render-spec [--out f]          render the human requirements spec
   render-handoff [--out f] [--force]   render the builder handoff
 

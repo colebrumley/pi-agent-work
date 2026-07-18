@@ -72,7 +72,7 @@ export async function requirementsStatus(root: string, featureId: string): Promi
   const valid = /valid:\s*true/.test(text);
   const handoffPath = join(dir, "handoff.md");
   const forced = existsSync(handoffPath)
-    ? (await readFile(handoffPath, "utf8")).includes("FORCED handoff")
+    ? (await readFile(handoffPath, "utf8")).includes("READINESS OPT-OUT (NON-ATTESTED)")
     : false;
   return { exists: true, dir, valid, handoffReady, reportText: text, handoffPath: existsSync(handoffPath) ? handoffPath : undefined, forced };
 }
@@ -92,11 +92,8 @@ export async function renderRequirementsArtifacts(
   if (options.force) handoffArgs.push("--force");
   const handoff = await runRequirementsCli(handoffArgs, root);
   if (handoff.code !== 0) throw new Error(handoff.stderr || handoff.stdout || "render-handoff failed");
-  const forced = options.force === true;
-  if (forced) {
-    const marker = join(dir, "handoff.forced.json");
-    await writeFile(marker, `${JSON.stringify({ forced: true, at: new Date().toISOString() }, null, 2)}\n`);
-  }
+  const renderedText = await readFile(handoffPath, "utf8");
+  const forced = renderedText.includes("READINESS OPT-OUT (NON-ATTESTED)");
   return { dir, specPath, handoffPath, forced };
 }
 
@@ -109,11 +106,11 @@ export async function assertWriteGate(
   if (!status.exists) {
     throw new Error(`Requirements package missing for ${featureId}. Run /requirements or agent_requirements first.`);
   }
-  if (!status.handoffReady && !options.force) {
-    throw new Error(`Requirements not handoff-ready for ${featureId}.\n${status.reportText ?? ""}`.trim());
+  if (!status.handoffReady) {
+    throw new Error(`Requirements not handoff-ready for ${featureId}. A force flag is not risk acceptance; only an explicit eligible readinessOptOut in state can bypass attestation.\n${status.reportText ?? ""}`.trim());
   }
   if (!status.handoffPath || options.force || status.forced) {
-    const rendered = await renderRequirementsArtifacts(root, featureId, { force: options.force || !status.handoffReady });
+    const rendered = await renderRequirementsArtifacts(root, featureId, { force: options.force });
     return { handoffPath: rendered.handoffPath, forced: rendered.forced || Boolean(status.forced) };
   }
   return { handoffPath: status.handoffPath, forced: Boolean(status.forced) };

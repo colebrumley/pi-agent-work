@@ -90,6 +90,30 @@ export function renderSpec(state: RequirementsState): string {
   } else out.push("_None._");
   out.push("");
 
+  out.push(h(2, "Structured acceptance tests"));
+  if (!state.acceptanceTests.length) out.push("_None._");
+  for (const test of state.acceptanceTests) {
+    out.push(`### [${test.id}] ${test.name}`);
+    out.push(`- Setup: ${test.setup}`);
+    out.push(`- Action: ${test.action}`);
+    out.push(`- Expected: ${test.expectedResult}`);
+    out.push(`- Fidelity: ${test.fidelityLayer}`);
+    out.push(`- Verifies: ${test.linkedRequirement}`);
+    out.push(`- Evidence: ${test.requiredEvidence}`);
+    out.push(`- Scenarios: ${test.categories.join(", ") || "none"}`);
+  }
+  out.push("");
+
+  out.push(h(2, "End-to-end build readiness"));
+  out.push(`- Buildable as-is without clarification or invented requirements: **${state.readiness.buildableEndToEnd}**`);
+  out.push(`- Requirements revision: \`${state.requirementsRevision}\``);
+  out.push(`- Rationale: ${state.readiness.rationale || "not supplied"}`);
+  out.push(`- Working parameters: ${state.readiness.workingParameters || "not supplied"}`);
+  out.push(`- Stop conditions: ${state.readiness.stopConditions.join("; ") || "none supplied"}`);
+  out.push(bullets(state.readiness.domains.map((d) => `${d.domain}: ${d.status} — ${d.rationale || "no rationale"}`)));
+  if (state.readinessOptOut) out.push(`- **NON-ATTESTED opt-out:** ${state.readinessOptOut.requestText} (approved by ${state.readinessOptOut.approvedBy})`);
+  out.push("");
+
   if (state.constraints.length) {
     out.push(h(2, "Constraints"));
     out.push(bullets(state.constraints.map((c) => `${c.text}${c.kind ? ` _(${c.kind})_` : ""}`)));
@@ -127,7 +151,7 @@ export function renderSpec(state: RequirementsState): string {
   if (deferred.length) {
     out.push(h(2, "Explicitly deferred"));
     out.push(
-      bullets(deferred.map((q) => `${q.question} _(${q.status}${q.possibleDefault ? `; default: ${q.possibleDefault}` : ""})_`))
+      bullets(deferred.map((q) => `${q.question} _(${q.status}${q.acceptedRiskAssumption ? `; assumption: ${q.acceptedRiskAssumption}; stop: ${q.stopCondition}` : ""})_`))
     );
     out.push("");
   }
@@ -186,7 +210,7 @@ function renderQuestions(qs: OpenQuestion[]): string {
   return qs
     .map(
       (q) =>
-        `- **[${q.id}]** (${q.blocking}) ${q.question}\n  - Why: ${q.whyItMatters}${q.possibleDefault ? `\n  - Possible default: ${q.possibleDefault}` : ""}`
+        `- **[${q.id}]** (${q.blocking}) ${q.question}\n  - Why: ${q.whyItMatters}${q.recommendation ? `\n  - Recommendation: ${q.recommendation}\n  - Rationale: ${q.recommendationRationale}` : ""}`
     )
     .join("\n");
 }

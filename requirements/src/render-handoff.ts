@@ -29,19 +29,37 @@ export function renderHandoff(
   opts: { force?: boolean } = {}
 ): HandoffResult {
   const report = validateRequirements(state);
-  if (!opts.force && !report.handoffReady) {
-    return { ok: false, report };
-  }
+  // `force` is retained for CLI compatibility but is never an implicit bypass.
+  // A bypass is represented in state and validates only for explicit tiny/small opt-out.
+  if (!report.handoffReady) return { ok: false, report };
 
   const out: string[] = [];
 
   out.push(h(1, `Builder Handoff: ${state.featureName}`));
   out.push(`> Tier: **${state.tier}** · Source of truth: \`requirements.json\` + \`decision-log.json\`.`);
-  if (opts.force && !report.handoffReady)
-    out.push(`> ⚠️ FORCED handoff: emitted with ${report.errors.length} error(s) and ${report.blockers.length} blocker(s). Builders proceed at risk.`);
+  if (state.readinessOptOut)
+    out.push(`> ⚠️ READINESS OPT-OUT (NON-ATTESTED): explicitly requested by ${state.readinessOptOut.approvedBy}. This is not a normal readiness attestation.`);
   out.push("");
 
-  out.push("**Contract:** Builders MUST NOT reinterpret, expand, or narrow these requirements. If reality contradicts them, STOP and update the requirements state (re-run the interviewer) before writing code. This document is downstream of structured state, not a license to improvise.");
+  out.push("**Contract:** Builders MUST NOT reinterpret, expand, or narrow these requirements. If reality contradicts them, STOP immediately, preserve work, report the blocking discovery, and return the feature to requirements clarification. Never guess. This document is downstream of structured state, not a license to improvise.");
+  out.push("");
+
+  out.push(h(2, "Build-readiness contract"));
+  if (state.readinessOptOut) {
+    out.push(`- **NON-ATTESTED tiny/small opt-out:** ${state.readinessOptOut.requestText}`);
+    out.push(bullets(state.readinessOptOut.choices.map((c) => `[${c.questionId}] ${c.answer} — Rationale: ${c.rationale}`)));
+  } else {
+    out.push("- **READINESS ATTESTATION: YES.** This specification can be built hands-off end to end as-is without further clarification or invented requirements, within the listed assumptions and stop conditions.");
+  }
+  out.push(`- **Requirements revision:** \`${state.requirementsRevision}\``);
+  out.push(`- **Working parameters:** ${state.readiness.workingParameters}`);
+  out.push(`- **Assessment rationale:** ${state.readiness.rationale}`);
+  out.push("- **Assumptions:**");
+  out.push(bullets(state.readiness.assumptions));
+  out.push("- **Bailout stop conditions:**");
+  out.push(bullets(state.readiness.stopConditions));
+  out.push("- **Mandatory domain assessment:**");
+  out.push(bullets(state.readiness.domains.map((d) => `${d.domain}: ${d.status} — ${d.rationale}`)));
   out.push("");
 
   out.push(h(2, "Do build"));
@@ -81,6 +99,29 @@ export function renderHandoff(
   } else out.push("- _(none)_");
   out.push("");
 
+  out.push(h(2, "Acceptance tests and verification standards"));
+  out.push("Use every applicable layer in order: **real end-to-end → realistic smoke → integration → unit → static checks**. Any skipped higher-fidelity layer requires the rationale below or a valid named user-approved exception.");
+  out.push("");
+  out.push("Testing applicability:");
+  out.push(bullets(state.testingStandards.fidelity.map((x) => `${x.name}: ${x.applicable ? "applicable" : "not applicable"} — ${x.rationale}`)));
+  out.push("");
+  out.push("Adversarial coverage:");
+  out.push(bullets(state.testingStandards.adversarial.map((x) => `${x.name}: ${x.applicable ? "applicable" : "not applicable"} — ${x.rationale}`)));
+  out.push("");
+  for (const test of state.acceptanceTests) {
+    out.push(h(3, `[${test.id}] ${test.name}`));
+    out.push(`- Setup: ${test.setup}`);
+    out.push(`- Action: ${test.action}`);
+    out.push(`- Expected result: ${test.expectedResult}`);
+    out.push(`- Fidelity layer: ${test.fidelityLayer}`);
+    out.push(`- Linked requirement/criterion: ${test.linkedRequirement}`);
+    out.push(`- Categories: ${test.categories.join(", ") || "none"}`);
+    out.push(`- Required evidence: ${test.requiredEvidence}`);
+    const exception = state.testExceptions.find((x) => x.testId === test.id);
+    if (exception) out.push(`- Approved exception: ${exception.reason}; substitute: ${exception.substituteVerification}; residual risk: ${exception.residualRisk}; approved by ${exception.approvedBy}`);
+    out.push("");
+  }
+
   out.push(h(2, "Relevant decisions"));
   const confirmed = state.decisions.filter((d) => d.status === "confirmed").sort((a, b) => a.sequence - b.sequence);
   if (confirmed.length)
@@ -104,7 +145,7 @@ export function renderHandoff(
 
   out.push(h(2, "Deferred / accepted-risk questions"));
   const deferred = state.openQuestions.filter((q) => q.status === "deferred" || q.status === "accepted-risk");
-  out.push(bullets(deferred.map((q) => `${q.question} → ${q.status}${q.possibleDefault ? ` (default if forced: ${q.possibleDefault})` : ""}`)));
+  out.push(bullets(deferred.map((q) => `${q.question} → ${q.status}${q.acceptedRiskAssumption ? `; assumption: ${q.acceptedRiskAssumption}; stop condition: ${q.stopCondition}` : ""}`)));
   out.push("");
 
   if (state.dependencies.length) {
@@ -137,6 +178,10 @@ export function renderHandoff(
     "Anything in *Do NOT build* is out of scope — do not add it even if it seems helpful.",
     "Treat acceptance criteria as the definition of done; do not mark complete until each is satisfiable.",
     "Honor confirmed decisions exactly; do not revisit rejected alternatives without updating the decision log.",
+    "Treat acceptance tests and evidence as deliverables. Record sanitized bounded evidence with commands, results, environment, scenarios, relevant output, artifact paths, and hashes.",
+    "Do not claim completion while any required test fails or cannot run. Continue, bail to clarification, or obtain a valid named user-approved exception.",
+    "Review and integration require fresh independent verification tied to this requirements revision and the exact current implementation commit; any code change invalidates approval.",
+    "A guarantee-breaking unknown requires status=blocked: stop, preserve work, report it, and return to clarification without integration.",
     ...state.handoffNotes,
   ]));
   out.push("");

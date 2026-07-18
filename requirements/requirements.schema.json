@@ -9,12 +9,13 @@
     "schemaVersion", "featureName", "problemStatement", "tier",
     "goals", "nonGoals", "actors", "userJourneys",
     "functionalRequirements", "nonFunctionalRequirements", "constraints",
-    "assumptions", "risks", "openQuestions", "acceptanceCriteria",
+    "assumptions", "risks", "openQuestions", "acceptanceCriteria", "acceptanceTests",
+    "testingStandards", "testExceptions", "readiness", "requirementsRevision",
     "outOfScope", "dependencies", "rollout", "observability", "security",
     "operational", "riskReviews", "handoffNotes", "meta"
   ],
   "properties": {
-    "schemaVersion": { "type": "integer", "const": 1 },
+    "schemaVersion": { "type": "integer", "const": 2 },
     "featureName": { "type": "string", "minLength": 1 },
     "problemStatement": { "type": "string" },
     "tier": { "enum": ["tiny", "small", "medium", "large", "epic"] },
@@ -30,6 +31,12 @@
     "risks": { "type": "array", "items": { "$ref": "#/$defs/risk" } },
     "openQuestions": { "type": "array", "items": { "$ref": "#/$defs/openQuestion" } },
     "acceptanceCriteria": { "type": "array", "items": { "$ref": "#/$defs/acceptanceCriterion" } },
+    "acceptanceTests": { "type": "array", "items": { "$ref": "#/$defs/acceptanceTest" } },
+    "testingStandards": { "$ref": "#/$defs/testingStandards" },
+    "testExceptions": { "type": "array", "items": { "$ref": "#/$defs/testException" } },
+    "readiness": { "$ref": "#/$defs/readiness" },
+    "readinessOptOut": { "$ref": "#/$defs/readinessOptOut" },
+    "requirementsRevision": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
     "dependencies": { "type": "array", "items": { "$ref": "#/$defs/dependency" } },
     "decisions": { "type": "array", "items": { "$ref": "#/$defs/decision" } },
     "rollout": { "$ref": "#/$defs/rolloutSection" },
@@ -148,9 +155,15 @@
         "category": { "type": "string" },
         "whyItMatters": { "type": "string" },
         "blocking": { "enum": ["blocking", "non-blocking", "optional"] },
+        "recommendation": { "type": "string" },
+        "recommendationRationale": { "type": "string" },
         "possibleDefault": { "type": "string" },
         "status": { "enum": ["open", "answered", "deferred", "accepted-risk"] },
-        "linked": { "type": "string" }
+        "linked": { "type": "string" },
+        "answer": { "type": "string" },
+        "answerSource": { "enum": ["user", "interviewer"] },
+        "acceptedRiskAssumption": { "type": "string" },
+        "stopCondition": { "type": "string" }
       }
     },
     "acceptanceCriterion": {
@@ -165,6 +178,45 @@
         "testability": { "enum": ["testable", "manual", "unclear"] },
         "priority": { "enum": ["must", "should", "could"] }
       }
+    },
+    "acceptanceTest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "setup", "action", "expectedResult", "fidelityLayer", "linkedRequirement", "requiredEvidence", "categories"],
+      "properties": {
+        "id": { "type": "string" }, "name": { "type": "string", "minLength": 1 },
+        "setup": { "type": "string", "minLength": 1 }, "action": { "type": "string", "minLength": 1 },
+        "expectedResult": { "type": "string", "minLength": 1 },
+        "fidelityLayer": { "enum": ["real-end-to-end", "realistic-smoke", "integration", "unit", "static"] },
+        "linkedRequirement": { "type": "string", "minLength": 1 }, "requiredEvidence": { "type": "string", "minLength": 1 },
+        "categories": { "type": "array", "items": { "enum": ["happy-path", "boundaries", "malformed-input", "failure-recovery", "regression", "abuse"] }, "uniqueItems": true }
+      }
+    },
+    "applicability": {
+      "type": "object", "additionalProperties": false, "required": ["name", "applicable", "rationale"],
+      "properties": { "name": { "type": "string" }, "applicable": { "type": "boolean" }, "rationale": { "type": "string" } }
+    },
+    "testingStandards": {
+      "type": "object", "additionalProperties": false, "required": ["fidelity", "adversarial"],
+      "properties": { "fidelity": { "type": "array", "items": { "$ref": "#/$defs/applicability" } }, "adversarial": { "type": "array", "items": { "$ref": "#/$defs/applicability" } } }
+    },
+    "testException": {
+      "type": "object", "additionalProperties": false,
+      "required": ["testId", "reason", "substituteVerification", "residualRisk", "explicitUserApproval", "requirementsRevision"],
+      "properties": { "testId": { "type": "string" }, "reason": { "type": "string" }, "substituteVerification": { "type": "string" }, "residualRisk": { "type": "string" }, "approvedBy": { "type": "string" }, "explicitUserApproval": { "type": "boolean" }, "requirementsRevision": { "type": "string" }, "implementationCommit": { "type": "string" } }
+    },
+    "readiness": {
+      "type": "object", "additionalProperties": false,
+      "required": ["buildableEndToEnd", "rationale", "workingParameters", "assumptions", "stopConditions", "domains"],
+      "properties": {
+        "buildableEndToEnd": { "enum": ["yes", "no", "unanswered"] }, "rationale": { "type": "string" }, "workingParameters": { "type": "string" },
+        "assumptions": { "type": "array", "items": { "type": "string" } }, "stopConditions": { "type": "array", "items": { "type": "string" } }, "assessedBy": { "type": "string" },
+        "domains": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["domain", "status", "rationale"], "properties": { "domain": { "enum": ["scope", "non-scope", "behavior", "ux", "errors", "edge-cases", "data", "integrations", "compatibility", "security", "operations", "rollout", "tests", "bailout-conditions"] }, "status": { "enum": ["resolved", "not-applicable", "open"] }, "rationale": { "type": "string" } } } }
+      }
+    },
+    "readinessOptOut": {
+      "type": "object", "additionalProperties": false, "required": ["requestedByUser", "approvedBy", "requestText", "choices"],
+      "properties": { "requestedByUser": { "type": "boolean" }, "approvedBy": { "type": "string" }, "requestText": { "type": "string" }, "choices": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["questionId", "answer", "rationale"], "properties": { "questionId": { "type": "string" }, "answer": { "type": "string" }, "rationale": { "type": "string" } } } } }
     },
     "dependency": {
       "type": "object",

@@ -25,7 +25,8 @@ import type {
   Testability,
   Priority,
 } from "./types.ts";
-import { TIERS } from "./types.ts";
+import { ADVERSARIAL_CATEGORIES, FIDELITY_LAYERS, READINESS_DOMAINS, TIERS } from "./types.ts";
+import { requirementsRevision } from "./revision.ts";
 
 export interface Issue {
   code: string;
@@ -163,7 +164,7 @@ export function validateSchema(state: any): Issue[] {
   const collections = [
     "goals", "nonGoals", "actors", "userJourneys", "functionalRequirements",
     "nonFunctionalRequirements", "constraints", "assumptions", "risks",
-    "openQuestions", "acceptanceCriteria", "outOfScope", "dependencies", "decisions",
+    "openQuestions", "acceptanceCriteria", "acceptanceTests", "outOfScope", "dependencies", "decisions",
   ];
   for (const key of collections) {
     const list = state[key];
@@ -222,12 +223,44 @@ export function validateSchema(state: any): Issue[] {
     checkField(issues, isStr(q?.whyItMatters), `openQuestions[${i}].whyItMatters`, "must be a string");
     checkEnum(issues, q.blocking, ENUMS.questionBlocking, `openQuestions[${i}].blocking`);
     checkEnum(issues, q.status, ENUMS.questionStatus, `openQuestions[${i}].status`);
+    if (q.answerSource !== undefined) checkEnum(issues, q.answerSource, ["user", "interviewer"], `openQuestions[${i}].answerSource`);
+    for (const field of ["recommendation", "recommendationRationale", "answer", "acceptedRiskAssumption", "stopCondition"])
+      if (q[field] !== undefined) checkField(issues, isStr(q[field]), `openQuestions[${i}].${field}`, "must be a string");
   });
   (state.acceptanceCriteria ?? []).forEach((c: any, i: number) => {
     checkField(issues, isStr(c?.criterion), `acceptanceCriteria[${i}].criterion`, "must be a string");
     checkEnum(issues, c.testability, ENUMS.testability, `acceptanceCriteria[${i}].testability`);
     checkEnum(issues, c.priority, ENUMS.priority, `acceptanceCriteria[${i}].priority`);
   });
+  (state.acceptanceTests ?? []).forEach((t: any, i: number) => {
+    for (const field of ["name", "setup", "action", "expectedResult", "linkedRequirement", "requiredEvidence"])
+      checkField(issues, isNonEmptyStr(t?.[field]), `acceptanceTests[${i}].${field}`, "must be a non-empty string");
+    checkEnum(issues, t?.fidelityLayer, [...FIDELITY_LAYERS], `acceptanceTests[${i}].fidelityLayer`);
+    checkField(issues, Array.isArray(t?.categories) && t.categories.every((x: any) => ADVERSARIAL_CATEGORIES.includes(x)), `acceptanceTests[${i}].categories`, "must contain valid adversarial categories");
+  });
+  checkField(issues, state.schemaVersion === 2, "schemaVersion", "must be 2");
+  checkField(issues, isNonEmptyStr(state.requirementsRevision), "requirementsRevision", "must be a non-empty content hash");
+  checkField(issues, state.readiness && typeof state.readiness === "object", "readiness", "must be an object");
+  checkEnum(issues, state.readiness?.buildableEndToEnd, ["yes", "no", "unanswered"], "readiness.buildableEndToEnd");
+  checkField(issues, isStr(state.readiness?.rationale), "readiness.rationale", "must be a string");
+  checkField(issues, isStr(state.readiness?.workingParameters), "readiness.workingParameters", "must be a string");
+  checkField(issues, isStrArray(state.readiness?.assumptions), "readiness.assumptions", "must be an array of strings");
+  checkField(issues, isStrArray(state.readiness?.stopConditions), "readiness.stopConditions", "must be an array of strings");
+  checkField(issues, Array.isArray(state.readiness?.domains), "readiness.domains", "must be an array");
+  (state.readiness?.domains ?? []).forEach((d: any, i: number) => {
+    checkEnum(issues, d?.domain, [...READINESS_DOMAINS], `readiness.domains[${i}].domain`);
+    checkEnum(issues, d?.status, ["resolved", "not-applicable", "open"], `readiness.domains[${i}].status`);
+    checkField(issues, isStr(d?.rationale), `readiness.domains[${i}].rationale`, "must be a string");
+  });
+  checkField(issues, state.testingStandards && Array.isArray(state.testingStandards.fidelity) && Array.isArray(state.testingStandards.adversarial), "testingStandards", "must contain fidelity and adversarial arrays");
+  for (const [field, names] of [["fidelity", FIDELITY_LAYERS], ["adversarial", ADVERSARIAL_CATEGORIES]] as const) {
+    (state.testingStandards?.[field] ?? []).forEach((a: any, i: number) => {
+      checkEnum(issues, a?.name, [...names], `testingStandards.${field}[${i}].name`);
+      checkField(issues, typeof a?.applicable === "boolean", `testingStandards.${field}[${i}].applicable`, "must be a boolean");
+      checkField(issues, isStr(a?.rationale), `testingStandards.${field}[${i}].rationale`, "must be a string");
+    });
+  }
+  checkField(issues, Array.isArray(state.testExceptions), "testExceptions", "must be an array");
   (state.dependencies ?? []).forEach((d: any, i: number) => {
     checkField(issues, isStr(d?.name), `dependencies[${i}].name`, "must be a string");
     checkEnum(issues, d?.kind, ENUMS.dependencyKind, `dependencies[${i}].kind`);
@@ -285,6 +318,8 @@ export function validateRequirements(state: RequirementsState): ValidationReport
   }
 
   const tier = state.tier;
+  if (state.requirementsRevision !== requirementsRevision(state))
+    errors.push(err("revision.stale", "requirementsRevision does not match deterministic requirements content hash", "requirementsRevision"));
 
   // --- core fields ---
   if (!state.featureName.trim())
@@ -336,13 +371,18 @@ export function validateRequirements(state: RequirementsState): ValidationReport
     }
   }
 
-  // --- blocking open questions must be answered / deferred / accepted-risk ---
+  // --- every material/open ambiguity remains blocking and visibly recommended ---
   for (const q of state.openQuestions) {
-    if (q.blocking === "blocking" && q.status === "open") {
-      const issue = err("question.blocking", `Blocking question "${q.id}" is unanswered: ${q.question}`, q.id);
+    if (q.status === "open" || q.status === "deferred") {
+      const issue = err("question.unresolved", `Clarification "${q.id}" is unresolved: ${q.question}`, q.id);
       blockers.push(issue);
-      // not pushed to errors: it blocks handoff but state can still be "valid" mid-interview
+      if (!q.recommendation?.trim() || !q.recommendationRationale?.trim())
+        errors.push(err("question.recommendation", `Open clarification "${q.id}" requires exactly one visible recommendation and rationale`, q.id));
     }
+    if (q.status === "answered" && (!q.answer?.trim() || !["user", "interviewer"].includes(q.answerSource ?? "")))
+      errors.push(err("question.answer", `Answered clarification "${q.id}" must record its answer and source`, q.id));
+    if (q.status === "accepted-risk" && (!q.acceptedRiskAssumption?.trim() || !q.stopCondition?.trim()))
+      errors.push(err("question.acceptedRisk", `Accepted risk "${q.id}" requires an explicit assumption and stop condition`, q.id));
     if (q.linked) {
       const known =
         goalIds.has(q.linked) || reqIds.has(q.linked) ||
@@ -350,6 +390,84 @@ export function validateRequirements(state: RequirementsState): ValidationReport
       if (!known)
         warnings.push(warn("question.linkRef", `Question "${q.id}" links unknown id "${q.linked}"`, q.id));
     }
+  }
+
+  // --- explicit end-to-end semantic readiness gate (all tiers) ---
+  const readiness = state.readiness;
+  const domainMap = new Map(readiness.domains.map((d) => [d.domain, d]));
+  if (domainMap.size !== readiness.domains.length)
+    errors.push(err("readiness.domainDuplicate", "Each readiness domain must appear exactly once", "readiness.domains"));
+  for (const domain of READINESS_DOMAINS) {
+    const item = domainMap.get(domain);
+    if (!item || item.status === "open" || !item.rationale?.trim())
+      blockers.push(err("readiness.domain", `Readiness domain "${domain}" must be resolved or not applicable with rationale`, `readiness.${domain}`));
+  }
+  if (!readiness.workingParameters?.trim())
+    blockers.push(err("readiness.parameters", "Readiness must define builder working parameters", "readiness.workingParameters"));
+  if (!readiness.rationale?.trim())
+    blockers.push(err("readiness.rationale", "Readiness answer requires rationale", "readiness.rationale"));
+  if (!readiness.stopConditions.length || readiness.stopConditions.some((x) => !x.trim()))
+    blockers.push(err("readiness.stopConditions", "Readiness must list explicit bailout stop conditions", "readiness.stopConditions"));
+
+  const optOut = state.readinessOptOut;
+  let optOutValid = false;
+  if (optOut) {
+    if (!(["tiny", "small"] as Tier[]).includes(tier))
+      errors.push(err("readiness.optOutTier", `Readiness opt-out is unavailable for ${tier} features`, "readinessOptOut"));
+    else if (!optOut.requestedByUser || !optOut.approvedBy?.trim() || !optOut.requestText?.trim())
+      errors.push(err("readiness.optOutApproval", "Tiny/small opt-out requires an explicit user request and named approver", "readinessOptOut"));
+    else if (optOut.choices.some((c) => !c.questionId?.trim() || !c.answer?.trim() || !c.rationale?.trim()))
+      errors.push(err("readiness.optOutChoices", "Every opt-out choice requires question, answer, and rationale", "readinessOptOut.choices"));
+    else if (optOut.choices.some((c) => !state.openQuestions.some((q) => q.id === c.questionId && q.status === "answered" && q.answerSource === "interviewer" && q.answer === c.answer)) ||
+             state.openQuestions.some((q) => q.answerSource === "interviewer" && !optOut.choices.some((c) => c.questionId === q.id && c.answer === q.answer)))
+      errors.push(err("readiness.optOutDisclosure", "Every and only interviewer-selected answers must be disclosed in opt-out choices", "readinessOptOut.choices"));
+    else optOutValid = true;
+  }
+  if (!optOutValid && readiness.buildableEndToEnd !== "yes")
+    blockers.push(err("readiness.attestation", "Can this specification be built end to end as-is without further clarification or inventing requirements? Answer must be unambiguously yes", "readiness.buildableEndToEnd"));
+  if (!optOutValid) {
+    for (const q of state.openQuestions) {
+      if (q.status === "answered" && q.answerSource === "interviewer")
+        errors.push(err("question.silentAdoption", `Interviewer answer "${q.id}" requires explicit user acceptance`, q.id));
+    }
+    for (const d of state.decisions) {
+      if (d.status === "confirmed" && d.source === "interviewer")
+        errors.push(err("decision.silentAdoption", `Interviewer recommendation "${d.id}" cannot be confirmed without user acceptance`, d.id));
+    }
+  }
+
+  // --- executable acceptance contract and ordered fidelity/adversarial assessments ---
+  for (const q of state.openQuestions.filter((item) => item.status === "accepted-risk")) {
+    if (!readiness.assumptions.includes(q.acceptedRiskAssumption!) || !readiness.stopConditions.includes(q.stopCondition!))
+      errors.push(err("readiness.acceptedRisk", `Accepted risk "${q.id}" must be listed in readiness assumptions and stop conditions`, q.id));
+  }
+  if (state.acceptanceTests.length === 0)
+    errors.push(err("tests.required", "At least one structured acceptance test is required at every tier", "acceptanceTests"));
+  const linkIds = new Set([...goalIds, ...reqIds, ...state.acceptanceCriteria.map((x) => x.id)]);
+  for (const test of state.acceptanceTests) {
+    if (!linkIds.has(test.linkedRequirement))
+      errors.push(err("tests.link", `Acceptance test "${test.id}" links unknown requirement or criterion "${test.linkedRequirement}"`, test.id));
+  }
+  for (const [field, required] of [["fidelity", FIDELITY_LAYERS], ["adversarial", ADVERSARIAL_CATEGORIES]] as const) {
+    const entries = state.testingStandards[field];
+    const byName = new Map(entries.map((x) => [x.name, x]));
+    if (byName.size !== entries.length) errors.push(err("tests.applicabilityDuplicate", `Testing ${field} entries must be unique`, `testingStandards.${field}`));
+    for (const name of required) {
+      const entry = byName.get(name as any);
+      if (!entry || !entry.rationale?.trim())
+        errors.push(err("tests.applicability", `Testing ${field} "${name}" requires an applicability rationale`, `testingStandards.${field}`));
+    }
+  }
+  for (const category of state.testingStandards.adversarial.filter((item) => item.applicable).map((item) => item.name)) {
+    if (!state.acceptanceTests.some((test) => test.categories.includes(category)))
+      errors.push(err("tests.adversarialCoverage", `Applicable adversarial category "${category}" is not assigned to any acceptance test`, "acceptanceTests"));
+  }
+  for (const exception of state.testExceptions) {
+    if (!state.acceptanceTests.some((t) => t.id === exception.testId) || !exception.reason?.trim() ||
+        !exception.substituteVerification?.trim() || !exception.residualRisk?.trim() ||
+        !exception.explicitUserApproval || !exception.approvedBy?.trim() ||
+        exception.requirementsRevision !== state.requirementsRevision)
+      errors.push(err("tests.exception", `Test exception for "${exception.testId}" is incomplete, unapproved, stale, or names no test`, "testExceptions"));
   }
 
   // --- large/epic require at least one risk review ---

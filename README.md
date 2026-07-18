@@ -13,7 +13,7 @@ This package is intentionally opinionated around a specific development setup:
 - **The workflow is automatic.** Ask for a feature in normal language. The coordinator should initialize the feature, load the requirements interviewer, present high-impact questions via `agent_questionnaire` in TUI (chat fallback otherwise), and advance the lifecycle without making you remember slash commands.
 - **Review remains mandatory.** “One shot” does not mean blindly trusting the first result. Writing happens in an isolated worktree, then receives adversarial review before explicit integration.
 
-Models and routing weights are configurable, and the requirements gate can be forcibly bypassed, but doing so departs from the workflow this package is designed to support.
+Models and routing weights are configurable. The readiness gate has no force-flag bypass: only tiny/small features may use a state-recorded, explicitly user-approved, visibly non-attested opt-out that still defines every remaining answer. Medium and larger features must pass normal readiness.
 
 ## Install or test
 
@@ -70,9 +70,11 @@ Optional explicit skill command: `/skill:requirements-interviewer`
         ├── status.json
         ├── current.json
         ├── critique/           # multi-perspective review outputs
+        ├── verification-report.json # schema-v2 independent report bound to exact commit
         └── attempts/001/
             ├── invocation.json
             ├── handoff.json
+            ├── evidence.json   # sanitized bounded builder evidence + artifact hashes
             ├── events.jsonl
             ├── session.json
             ├── sessions/
@@ -87,7 +89,7 @@ pending → running → review → integrated
                  ↘ done | blocked | failed | cancelled
 ```
 
-Write delegation requires a handoff-ready requirements package (or explicit `forceRequirements`).
+Write delegation requires a schema-v2 handoff-ready requirements package. `forceRequirements` is retained for API compatibility but never constitutes risk acceptance or bypasses validation.
 
 ## Progress and cancellation
 
@@ -98,7 +100,9 @@ Every update carries feature/task/attempt/operation IDs and is appended to `.age
 ## Design contracts
 
 - Requirements are structured state, not chat prose
-- Builder handoff refuses unless valid/ready
+- Builder handoff refuses unless every readiness domain is resolved and end-to-end buildability is explicitly attested (or an eligible explicit tiny/small opt-out is recorded)
+- Schema-v1 requirements migrate losslessly to incomplete schema v2 and require re-interview
+- Structured acceptance tests, bounded sanitized builder evidence, exact requirements/commit hashes, and fresh machine-readable independent verification gate integration
 - Do build / Do NOT build + decisions with rejected alternatives
 - Multi-perspective critique with independent verification of critical/high findings
 - Always-on Critical Feedback Protocol for coordinator and children

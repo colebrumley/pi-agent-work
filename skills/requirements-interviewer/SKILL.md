@@ -49,9 +49,11 @@ Pick the smallest that fits: `tiny`, `small`, `medium`, `large`, `epic`.
 4. **Chat fallback:** if `agent_questionnaire` returns `status=ui_unavailable` or `status=cancelled`, or the session is print/JSON/RPC, ask the same questions conversationally. Do not block or treat fallback as failure.
 5. Wait for answers. Do not invent requirements.
 6. Write a patch JSON and `apply` it from the structured questionnaire details (or chat answers).
-7. Repeat until handoff-ready, or user defers / accepts remaining risk.
-8. Render spec + handoff into the requirements directory.
-9. Tell the coordinator the requirements package path and any forced-risk notes.
+7. Repeat skeptically until the state answers **yes** to: “Can this specification be built end to end as-is without needing further clarification or inventing requirements?” and every mandatory readiness domain is resolved or explicitly not applicable with rationale.
+8. For every material ambiguity, keep an `openQuestions` item and present exactly one recommendation plus rationale. Never confirm an interviewer recommendation in the normal path until the user accepts it.
+9. Define structured acceptance tests and testing applicability before handoff. Use the ordered fidelity hierarchy: real end-to-end, realistic smoke, integration, unit, static; justify every skipped higher layer. Cover or rationalize happy path, boundaries, malformed input, failure/recovery, regression, and abuse.
+10. Render spec + handoff into the requirements directory only after the deterministic gate passes.
+11. Tell the coordinator the requirements package path and any explicitly accepted risks.
 
 ## Questionnaire usage
 
@@ -68,12 +70,19 @@ Isolated subagents do **not** receive `agent_questionnaire`. If a builder/scout/
 ## Patch rules
 
 - Confirmed decisions need rationale and rejected alternatives when they existed.
+- Every open question needs one `recommendation` and one `recommendationRationale`; do not offer zero or multiple recommendations.
+- An answered question records `answer`. An accepted risk records both `acceptedRiskAssumption` and `stopCondition`.
 - Assumptions stay `proposed` until confirmed/rejected/accepted-risk.
 - Every acceptance criterion must link a goal or requirement.
+- Every acceptance test records setup, action, expected result, fidelity layer, linked requirement/criterion, required evidence, and applicable adversarial categories.
+- Fill all 14 readiness domains. “Not applicable” always has a concrete product rationale.
+- Keep the interview about observable product behavior—not architecture, libraries, or implementation design.
 - Never hand-edit requirements JSON files.
 
 ## Hard boundaries
 
 - No implementation plans.
-- No handoff while invalid/unready unless the user explicitly allows `render-handoff --force`.
+- No normal handoff while invalid or unready.
+- Readiness bypass is forbidden for medium/large/epic. For tiny/small it requires an explicit user request and named approval, remains non-attested, and records every interviewer-selected answer with rationale in `readinessOptOut`. `--force` alone is never approval.
+- Accepted unknowns are non-blocking only with an explicit assumption and stop condition. Builders must stop immediately, preserve work, report blocked, and return to clarification if one triggers.
 - When handing off, bind builders to Do build / Do NOT build / acceptance criteria / confirmed decisions.

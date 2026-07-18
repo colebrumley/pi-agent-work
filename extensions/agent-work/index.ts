@@ -71,6 +71,8 @@ import {
 } from "./storage.ts";
 import { registerStatusFooter } from "./status-footer.ts";
 import { SCHEMA_VERSION, type Handoff, type InvocationRecord, type ProgressEvent, type ProgressOperationKind, type SessionReference, type TaskMode, type TaskRecord } from "./types.ts";
+import { loadState } from "../../requirements/src/state.ts";
+import { integrationBlockers, rerunAcceptanceTests, sanitizeSummary, validateBuilderEvidence, writeVerificationReport, type BuilderEvidence, type VerificationFinding } from "./verification.ts";
 
 const execFileAsync = promisify(execFile);
 const OUTPUT_LIMIT = 40_000;
@@ -263,6 +265,7 @@ async function runTask(
   const selectedThinking = input.thinking ?? route.thinking;
   const eventsFile = join(attemptPath, "events.jsonl");
   const handoffPath = join(attemptPath, "handoff.json");
+  const evidencePath = join(attemptPath, "evidence.json");
   const sessionDir = join(attemptPath, "sessions");
   const systemPromptPath = join(attemptPath, "system.md");
   let childCwd = input.cwdOverride ? resolve(input.cwdOverride) : root;
@@ -361,7 +364,7 @@ async function runTask(
     task.prompt,
     "",
     input.mode === "write"
-      ? `Write the required handoff to: ${handoffPath}`
+      ? `Write the required handoff to: ${handoffPath}\nWrite schema-v2 builder test evidence to: ${evidencePath}. Shape: {\"schemaVersion\":2,\"requirementsRevision\":\"sha256:...\",\"implementationCommit\":\"pending\",\"tests\":[{\"testId\":\"at-...\",\"command\":\"...\",\"result\":\"passed|failed|not-run\",\"environment\":\"...\",\"scenarios\":[\"happy-path|boundaries|malformed-input|failure-recovery|regression|abuse\"],\"summary\":\"bounded sanitized relevant output\",\"artifact\":{\"path\":\"durable path\",\"sha256\":\"sha256:...\"}}]}. Omit artifact only when the bounded summary is sufficient.`
       : "Return the required handoff JSON as your entire final response.",
   ].filter(Boolean).join("\n");
 
@@ -485,6 +488,8 @@ async function runTask(
 
     handoff.featureId = featureId;
     handoff.taskId = taskId;
+    handoff.summary = sanitizeSummary(handoff.summary);
+    handoff.checks = handoff.checks.map((check) => ({ ...check, command: check.command.slice(0, 2_000), evidence: check.evidence ? sanitizeSummary(check.evidence) : undefined }));
     handoff.attempt = attempt;
     handoff.session = { id: run.sessionId, file: sessionFile, eventsFile };
     handoff.createdAt ||= now();
@@ -501,12 +506,30 @@ async function runTask(
     await atomicJson(handoffPath, handoff);
 
     let commit: string | undefined;
+    let builderEvidence: BuilderEvidence | undefined;
+    if (input.mode === "write" && handoff.status === "done") {
+      const requirements = loadState(requirementsDir(root, featureId));
+      const rawEvidence = await exists(evidencePath) ? await readJson<unknown>(evidencePath) : undefined;
+      const evidenceCheck = await validateBuilderEvidence(requirements, rawEvidence);
+      // Persist only the sanitized, bounded representation even on refusal.
+      if (evidenceCheck.evidence) await atomicJson(evidencePath, evidenceCheck.evidence);
+      if (!evidenceCheck.valid || !evidenceCheck.evidence) {
+        handoff.status = "failed";
+        handoff.blockers = [...handoff.blockers, ...evidenceCheck.issues];
+        handoff.summary = `Completion evidence refused: ${evidenceCheck.issues.join("; ")}`;
+        await atomicJson(handoffPath, handoff);
+      } else builderEvidence = evidenceCheck.evidence;
+    }
     if (input.mode === "write" && handoff.status === "done") {
       const changes = (await command("git", ["status", "--porcelain"], childCwd)).stdout.trim();
       if (changes) {
         await command("git", ["add", "-A"], childCwd);
         await command("git", ["commit", "-m", `agent-work(${taskId}): ${input.title}`], childCwd);
         commit = (await command("git", ["rev-parse", "HEAD"], childCwd)).stdout.trim();
+      }
+      if (commit && builderEvidence) {
+        builderEvidence.implementationCommit = commit;
+        await atomicJson(evidencePath, builderEvidence);
       }
     }
 
@@ -821,7 +844,7 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "agent_delegate",
     label: "Delegate Task",
-    description: "Run an isolated persistent Pi subagent. Writing tasks require a handoff-ready requirements package (or forceRequirements).",
+    description: "Run an isolated persistent Pi subagent. Writing tasks require a handoff-ready schema-v2 requirements package; forceRequirements never bypasses readiness.",
     parameters: Type.Object({
       featureId: Type.String(),
       taskId: Type.String(),
@@ -836,7 +859,7 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       risk: Type.Optional(StringEnum(["low", "medium", "high"] as const)),
       prefer: Type.Optional(StringEnum(["cost", "speed", "quality", "balanced"] as const)),
       retry: Type.Optional(Type.Boolean()),
-      forceRequirements: Type.Optional(Type.Boolean({ description: "Allow write delegation with a forced risk-flagged requirements handoff" })),
+      forceRequirements: Type.Optional(Type.Boolean({ description: "Compatibility flag: rerender an already-valid handoff; never bypasses readiness or user approval" })),
       hardTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional operation timeout; disabled by default" })),
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
@@ -1094,28 +1117,7 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       const root = await projectRoot(ctx.cwd);
       const source = await readStatus(root, params.featureId, params.taskId);
       if (!source.worktree) throw new Error(`Task ${params.taskId} has no worktree to review`);
-
-      if (params.singleReviewer) {
-        const result = await runTask(root, {
-          featureId: params.featureId,
-          taskId: `${params.taskId}-review`,
-          title: `Review ${params.taskId}`,
-          prompt: params.prompt ?? `Review task ${params.taskId}. Inspect HEAD, its diff, and the working tree.`,
-          mode: "read",
-          profile: "reviewer",
-          dependsOn: [params.taskId],
-          model: params.model,
-          thinking: params.thinking,
-          retry: params.retry,
-          cwdOverride: source.worktree,
-          skipRequirementsGate: true,
-          hardTimeoutMs: params.hardTimeoutMs,
-          operationKind: "review",
-          operationId: _id,
-        }, signal, (progress, event) => onUpdate?.({ content: [{ type: "text", text: progress }], details: { progress: event } }));
-        return { content: [{ type: "text", text: result.receipt }], details: { operationId: result.operationId } };
-      }
-
+      if (!source.commit) throw new Error(`Task ${params.taskId} has no implementation commit to review`);
       const depth = params.depth ?? "standard";
       const total = perspectivesFor(params.targetType ?? "code", depth).length;
       const monitor = await ProgressMonitor.start({
@@ -1125,7 +1127,7 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
         attempt: source.currentAttempt,
         operationId: _id,
         operation: "review",
-        phase: "reviewing",
+        phase: "validating-evidence",
         counts: { completed: 0, active: 1, total },
         hardTimeoutMs: params.hardTimeoutMs,
         onDelivery: (event) => onUpdate?.({ content: [{ type: "text", text: formatProgress(event) }], details: { progress: event } }),
@@ -1136,6 +1138,52 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       if (signal?.aborted) abort();
       else signal?.addEventListener("abort", abort, { once: true });
       try {
+        const sourceAttempt = attemptDir(root, params.featureId, params.taskId, source.currentAttempt);
+        const evidencePath = join(sourceAttempt, "evidence.json");
+        const requirements = loadState(requirementsDir(root, params.featureId));
+        const evidenceRaw = await exists(evidencePath) ? await readJson<unknown>(evidencePath) : undefined;
+        const evidenceCheck = await validateBuilderEvidence(requirements, evidenceRaw, source.commit);
+        if (!evidenceCheck.valid || !evidenceCheck.evidence)
+          throw new Error(`Review refused: ${evidenceCheck.issues.join("; ")}`);
+        await monitor.milestone("Builder evidence validated");
+
+        if (params.singleReviewer) {
+          const result = await runTask(root, {
+            featureId: params.featureId,
+            taskId: `${params.taskId}-review`,
+            title: `Review ${params.taskId}`,
+            prompt: params.prompt ?? `Review task ${params.taskId}. Inspect HEAD, its diff, and the working tree.`,
+            mode: "read",
+            profile: "reviewer",
+            dependsOn: [params.taskId],
+            model: params.model,
+            thinking: params.thinking,
+            retry: params.retry,
+            cwdOverride: source.worktree,
+            skipRequirementsGate: true,
+            hardTimeoutMs: params.hardTimeoutMs,
+            operationKind: "review",
+            operationId: `${_id}-review`,
+          }, controller.signal, (progress, event) => onUpdate?.({ content: [{ type: "text", text: progress }], details: { progress: event } }));
+          await monitor.phaseChange("verifying-acceptance", "Rerunning required acceptance tests", { completed: 0, active: 1, total: requirements.acceptanceTests.length });
+          const singleFindings: VerificationFinding[] = parseFindings(result.finalText, "single-reviewer").map((item) => ({
+            severity: item.severity,
+            status: "open",
+            summary: sanitizeSummary(item.description),
+          }));
+          const verification = await rerunAcceptanceTests(requirements, evidenceCheck.evidence, source.worktree, source.commit, singleFindings, {
+            signal: controller.signal,
+            onProgress: async (progress) => {
+              if (progress.status === "running") await monitor.phaseChange("verifying-acceptance", `Rerunning ${progress.testId}`, { completed: progress.completed, active: 1, total: progress.total });
+              else await monitor.milestone(`${progress.testId}: ${progress.status}`, { completed: progress.completed, active: 0, total: progress.total });
+            },
+          });
+          const verificationPath = join(taskDir(root, params.featureId, params.taskId), "verification-report.json");
+          await writeVerificationReport(verificationPath, verification);
+          await monitor.terminal(verification.approved ? "success" : "failure", verification.approved ? "Acceptance verification approved" : "Acceptance verification refused completion");
+          return { content: [{ type: "text", text: `${result.receipt}\nMachine verification: ${verificationPath}\nApproved: ${verification.approved}` }], details: { ...verification, operationId: _id, reviewOperationId: result.operationId } };
+        }
+
         const report = await runMultiPerspectiveReview(root, {
           featureId: params.featureId,
           taskId: params.taskId,
@@ -1150,8 +1198,24 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
           monitor.observe({ type: "message_update" });
           onUpdate?.({ content: [{ type: "text", text: progress }], details: { progress: event } });
         }, monitor);
-        await monitor.terminal("success", "Multi-perspective review completed");
-        return { content: [{ type: "text", text: report }], details: { operationId: _id } };
+        const critique = await readJson<{ findings?: Array<{ severity: "critical" | "high" | "medium" | "low"; description: string; verification?: { verdict?: string } }> }>(join(taskDir(root, params.featureId, params.taskId), "critique", "latest.json"));
+        const findings: VerificationFinding[] = (critique.findings ?? []).map((item) => ({
+          severity: item.severity,
+          status: item.verification?.verdict === "false-positive" ? "false-positive" : "open",
+          summary: sanitizeSummary(item.description),
+        }));
+        await monitor.phaseChange("verifying-acceptance", "Rerunning required acceptance tests", { completed: 0, active: 1, total: requirements.acceptanceTests.length });
+        const verification = await rerunAcceptanceTests(requirements, evidenceCheck.evidence, source.worktree, source.commit, findings, {
+          signal: controller.signal,
+          onProgress: async (progress) => {
+            if (progress.status === "running") await monitor.phaseChange("verifying-acceptance", `Rerunning ${progress.testId}`, { completed: progress.completed, active: 1, total: progress.total });
+            else await monitor.milestone(`${progress.testId}: ${progress.status}`, { completed: progress.completed, active: 0, total: progress.total });
+          },
+        });
+        const verificationPath = join(taskDir(root, params.featureId, params.taskId), "verification-report.json");
+        await writeVerificationReport(verificationPath, verification);
+        await monitor.terminal(verification.approved ? "success" : "failure", verification.approved ? "Review and acceptance verification approved" : "Review completed but verification refused approval");
+        return { content: [{ type: "text", text: `${report}\nMachine verification: ${verificationPath}\nApproved: ${verification.approved}` }], details: { ...verification, operationId: _id } };
       } catch (error: any) {
         if (!monitor.isTerminal) await monitor.terminal(controller.signal.aborted ? "cancelled" : "failure", controller.signal.aborted ? "Review cancelled" : "Review failed; inspect persisted diagnostics");
         throw error;
@@ -1175,13 +1239,6 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       const status = await readStatus(root, params.featureId, params.taskId);
       if (status.state !== "review") throw new Error(`Task must be in review state, currently: ${status.state}`);
       if (!status.commit) throw new Error("Task has no commit to integrate");
-      const task = await readTask(root, params.featureId, params.taskId);
-      for (const dependency of task.dependsOn) {
-        const dependencyStatus = await readStatus(root, params.featureId, dependency);
-        if (!["done", "integrated"].includes(dependencyStatus.state)) {
-          throw new Error(`Dependency ${dependency} is not complete: ${dependencyStatus.state}`);
-        }
-      }
       const monitor = await ProgressMonitor.start({
         root,
         featureId: params.featureId,
@@ -1189,7 +1246,7 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
         attempt: status.currentAttempt,
         operationId: _id,
         operation: "integration",
-        phase: "integrating",
+        phase: "verification-gate",
         hardTimeoutMs: params.hardTimeoutMs,
         onDelivery: (event) => onUpdate?.({ content: [{ type: "text", text: formatProgress(event) }], details: { progress: event } }),
       });
@@ -1199,6 +1256,21 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       if (signal?.aborted) abort();
       else signal?.addEventListener("abort", abort, { once: true });
       try {
+        const requirements = loadState(requirementsDir(root, params.featureId));
+        const verificationPath = join(taskDir(root, params.featureId, params.taskId), "verification-report.json");
+        const verification = await exists(verificationPath) ? await readJson<unknown>(verificationPath) : undefined;
+        const verificationBlockers = integrationBlockers(requirements, status.commit, verification);
+        if (verificationBlockers.length) throw new Error(`Integration refused:\n- ${verificationBlockers.join("\n- ")}`);
+        await monitor.milestone("Current-commit verification report approved");
+        await monitor.phaseChange("dependency-gate", "Checking task dependencies");
+        const task = await readTask(root, params.featureId, params.taskId);
+        for (const dependency of task.dependsOn) {
+          const dependencyStatus = await readStatus(root, params.featureId, dependency);
+          if (!["done", "integrated"].includes(dependencyStatus.state)) {
+            throw new Error(`Dependency ${dependency} is not complete: ${dependencyStatus.state}`);
+          }
+        }
+        await monitor.phaseChange("integrating", "Cherry-picking independently verified commit");
         await withRootLock(root, async () => {
           await assertClean(root);
           await command("git", ["cherry-pick", status.commit!], root, controller.signal);
