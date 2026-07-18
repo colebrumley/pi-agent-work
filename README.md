@@ -2,6 +2,18 @@
 
 Durable, file-backed subagent orchestration for [Pi](https://pi.dev), with a deterministic requirements gate and multi-perspective review.
 
+## Baked-in assumptions
+
+This package is intentionally opinionated around a specific development setup:
+
+- **Codex subscription for coordination.** The interactive Pi session is expected to use a subscription-backed Codex model. The coordinator owns the requirements conversation, decomposition, routing, and final synthesis.
+- **OpenRouter for delegated work.** Isolated scouts, builders, and reviewers default to metered OpenRouter models. This combines a strong subscription-backed coordinator with independently routed workers whose actual API spend can be measured and optimized. You therefore need both working Codex subscription authentication and an `OPENROUTER_API_KEY` for the intended setup.
+- **One-shot development.** The target workflow is to give a builder a sufficiently complete handoff that it can implement a feature correctly in one bounded attempt—not to discover core product decisions while coding.
+- **Specification effort is front-loaded.** Requirements are interviewed, challenged, stored as structured state, validated, and rendered into a builder handoff before writes are allowed. Acceptance criteria, non-goals, decisions, rejected alternatives, risks, and deferred questions should be explicit.
+- **Review remains mandatory.** “One shot” does not mean blindly trusting the first result. Writing happens in an isolated worktree, then receives adversarial review before explicit integration.
+
+Models and routing weights are configurable, and the requirements gate can be forcibly bypassed, but doing so departs from the workflow this package is designed to support.
+
 ## Install or test
 
 ```bash
