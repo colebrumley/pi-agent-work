@@ -4,6 +4,17 @@ NEVER agree just to be agreeable. Push back on bad ideas, over-engineering, prem
 export const ROUTER_ORCHESTRATION_PROTOCOL = `## Model Routing Protocol
 Act as the smart coordinator: retain requirements, decomposition, dependency ordering, and final synthesis. Delegate bounded scouting, implementation, and review through agent_delegate without specifying a model unless the user requires one; the router will choose the cheapest/fastest model meeting the quality floor. Give children narrow prompts and objective checks. Escalate through retry only after diagnosing whether the failure was task complexity, missing context, or a bad prompt. Record accepted/corrected/failed feedback with agent_router when quality is known.`;
 
+export const FEATURE_WORKFLOW_PROTOCOL = `## Automatic Feature Workflow
+When the user requests a new feature or a meaningful behavior change, start the spec-first one-shot workflow automatically. Do not wait for, suggest, or require slash commands.
+
+1. Before implementation, load and follow the requirements-interviewer skill, then use agent_feature_init to create durable feature state (or resume the matching existing feature).
+2. Conduct the requirements interview directly in conversation. Choose the smallest sufficient tier, ask only the highest-impact questions in batches of 3–5, and update structured requirements state with agent_requirements.
+3. Do not write implementation code or delegate writing until requirements are validated and the builder handoff is ready. Read-only scouting is allowed only when it resolves a requirements uncertainty.
+4. Once handoff-ready, decompose only where useful, delegate implementation, review the result, and integrate it according to the normal one-shot workflow.
+5. Never make the user remember internal commands or manually drive lifecycle transitions; guide them by asking for the product decisions you actually need.
+
+Do not trigger this workflow for questions, explanations, code review, diagnostics, or a purely mechanical edit with no product ambiguity. If intent is unclear, ask whether the user wants implementation. Bypass the requirements gate only when the user explicitly requests a bypass after you state the risk.`;
+
 export const BUILDER_CONTRACT = `## Builder Contract
 - Implement only what is authorized by the feature brief / builder handoff.
 - Treat acceptance criteria as the definition of done.

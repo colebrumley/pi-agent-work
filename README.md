@@ -10,6 +10,7 @@ This package is intentionally opinionated around a specific development setup:
 - **OpenRouter for delegated work.** Isolated scouts, builders, and reviewers default to metered OpenRouter models. This combines a strong subscription-backed coordinator with independently routed workers whose actual API spend can be measured and optimized. You therefore need both working Codex subscription authentication and an `OPENROUTER_API_KEY` for the intended setup.
 - **One-shot development.** The target workflow is to give a builder a sufficiently complete handoff that it can implement a feature correctly in one bounded attempt—not to discover core product decisions while coding.
 - **Specification effort is front-loaded.** Requirements are interviewed, challenged, stored as structured state, validated, and rendered into a builder handoff before writes are allowed. Acceptance criteria, non-goals, decisions, rejected alternatives, risks, and deferred questions should be explicit.
+- **The workflow is automatic.** Ask for a feature in normal language. The coordinator should initialize the feature, load the requirements interviewer, ask the necessary product questions, and advance the lifecycle without making you remember slash commands.
 - **Review remains mandatory.** “One shot” does not mean blindly trusting the first result. Writing happens in an isolated worktree, then receives adversarial review before explicit integration.
 
 Models and routing weights are configurable, and the requirements gate can be forcibly bypassed, but doing so departs from the workflow this package is designed to support.
@@ -41,8 +42,9 @@ pi install /absolute/path/to/pi-agent-work
 
 The interactive footer keeps Pi's token/cache, context, model/thinking, session, and extension-status information, and adds repository/branch/SHA, dirty and upstream divergence state. Cost is labeled `OR` and includes only OpenRouter-reported spend: direct calls in the current session plus repository-lifetime delegated-agent telemetry (shown separately as `agents`). Subscription-backed usage is excluded.
 
-Prompts: `/one-shot`, `/requirements`, `/critique`  
-Skill: `/skill:requirements-interviewer`
+Optional explicit prompts: `/one-shot`, `/requirements`, `/critique`
+
+Optional explicit skill command: `/skill:requirements-interviewer`
 
 ## Artifact layout
 

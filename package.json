@@ -7,7 +7,7 @@
   "keywords": ["pi-package"],
   "license": "MIT",
   "scripts": {
-    "test": "node --experimental-strip-types extensions/agent-work/router.test.ts"
+    "test": "node --experimental-strip-types extensions/agent-work/router.test.ts && node --experimental-strip-types extensions/agent-work/policy.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

@@ -12,7 +12,7 @@ import {
   renderCritiqueReport,
   type CritiqueFinding,
 } from "./critique.ts";
-import { CRITICAL_FEEDBACK_PROTOCOL, ROUTER_ORCHESTRATION_PROTOCOL, perspectivePrompt, perspectivesFor, type CritiqueDepth, type CritiqueTargetType } from "./policy.ts";
+import { CRITICAL_FEEDBACK_PROTOCOL, FEATURE_WORKFLOW_PROTOCOL, ROUTER_ORCHESTRATION_PROTOCOL, perspectivePrompt, perspectivesFor, type CritiqueDepth, type CritiqueTargetType } from "./policy.ts";
 import {
   assertWriteGate,
   ensureRequirementsSession,
@@ -590,7 +590,7 @@ async function runMultiPerspectiveReview(
 export default function agentWorkExtension(pi: ExtensionAPI) {
   registerStatusFooter(pi);
   pi.on("before_agent_start", async (event) => ({
-    systemPrompt: `${event.systemPrompt}\n\n${CRITICAL_FEEDBACK_PROTOCOL}\n\n${ROUTER_ORCHESTRATION_PROTOCOL}`,
+    systemPrompt: `${event.systemPrompt}\n\n${CRITICAL_FEEDBACK_PROTOCOL}\n\n${FEATURE_WORKFLOW_PROTOCOL}\n\n${ROUTER_ORCHESTRATION_PROTOCOL}`,
   }));
 
   pi.registerTool({

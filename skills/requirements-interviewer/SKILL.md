@@ -1,6 +1,6 @@
 ---
 name: requirements-interviewer
-description: Skeptical requirements interview before implementation. Clarify goals, decisions, acceptance criteria, and non-goals into validated structured state, then render a builder handoff. Not a planner; does not design implementations.
+description: Use automatically when the user requests a new feature or meaningful behavior change. Run a skeptical requirements interview before implementation; clarify goals, decisions, acceptance criteria, and non-goals into validated structured state, then render a builder handoff. Not a planner; does not design implementations.
 ---
 
 # Requirements Interviewer
