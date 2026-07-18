@@ -89,13 +89,21 @@ pending → running → review → integrated
                  ↘ done | blocked | failed | cancelled
 ```
 
-Write delegation requires a schema-v2 handoff-ready requirements package. `forceRequirements` is retained for API compatibility but never constitutes risk acceptance or bypasses validation.
+Write delegation requires a schema-v2 handoff-ready requirements package. `forceRequirements` is retained for API compatibility but never constitutes risk acceptance or bypasses validation. Existing schema-v1 packages remain loadable, migrate without losing prior content, and intentionally remain not-ready until re-interviewed.
 
 ## Progress and cancellation
 
 Delegation, review, verification, follow-up, and integration emit an immediate start update, meaningful phase/milestone updates, and a heartbeat every 20 seconds. After 60 seconds without child output or structured-event activity, the monitor checks liveness and warns every 60 seconds until activity resumes. Silence does not abort a live child; optional `hardTimeoutMs` is disabled by default.
 
 Every update carries feature/task/attempt/operation IDs and is appended to `.agent-work/progress/` before best-effort live delivery. Use `agent_operation` to inspect, replay, list, or cancel. Cancellation terminates the child process tree, keeps artifacts/diagnostics, records one terminal event, and never automatically retries.
+
+Progress distinguishes active work from inactivity by monitoring structured child events, tool activity, commands, tests, file changes, and lifecycle status. Routine activity is coalesced into heartbeats; raw assistant text, hidden reasoning, and secrets are never used as progress output. Reload Pi after updating the extension so existing sessions pick up these hooks.
+
+## Verification gate
+
+Every requirements package defines structured acceptance tests using the preferred fidelity order: real end-to-end, realistic smoke, integration, unit, then static checks. Higher-fidelity omissions require an explicit rationale; legitimately untestable cases require a test-specific user approval tied to the exact requirements revision, substitute verification, and residual risk.
+
+A writing task records bounded, sanitized evidence including commands, environment, scenarios, results, and artifact hashes. Review reruns every feasible required test and writes `verification-report.json` for the exact implementation commit and requirements revision. Integration refuses stale evidence, failed/non-runnable non-exempt tests, missing adversarial coverage, or unresolved verified high/critical findings. Any code change requires fresh review.
 
 ## Design contracts
 
@@ -128,6 +136,12 @@ Pass `model` to `agent_delegate` for an explicit override. Otherwise, optional `
 ```bash
 node --experimental-strip-types requirements/src/cli.ts --help
 node --experimental-strip-types requirements/src/cli.ts init "Feature" --tier medium --dir .agent-work/features/<id>/requirements
+node --experimental-strip-types requirements/src/cli.ts gaps --dir .agent-work/features/<id>/requirements
+node --experimental-strip-types requirements/src/cli.ts validate --dir .agent-work/features/<id>/requirements
+node --experimental-strip-types requirements/src/cli.ts migrate --dir .agent-work/features/<id>/requirements
+node --experimental-strip-types requirements/src/cli.ts render-handoff --dir .agent-work/features/<id>/requirements
 ```
 
-Schema: `requirements/requirements.schema.json` and `schemas/agent-work.schema.json`.
+`render-handoff` fails closed until all 14 readiness domains are resolved or explicitly not applicable with rationale, structured acceptance tests exist, accepted risks have assumptions and bailout conditions, and the end-to-end buildability answer is unambiguously yes. Tiny/small opt-outs must be explicit and state-recorded; `--force` does not bypass these rules.
+
+Schemas: `requirements/requirements.schema.json` and `schemas/agent-work.schema.json`.

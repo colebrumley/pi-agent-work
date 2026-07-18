@@ -9,7 +9,9 @@ Otherwise critique the path/description with read-only researchers and attackers
 
 Rules:
 - Read-only only.
-- Require evidence citations.
-- Independently verify critical/high findings.
-- Produce severity-grouped findings, stuck false positives, consensus, and risk assessment.
+- Require evidence citations and inspect the builder's recorded acceptance-test evidence.
+- Independently rerun every feasible required acceptance test and verify approved exceptions for non-runnable tests.
+- Independently verify critical/high findings against the exact reviewed commit.
+- Produce severity-grouped findings, separated false positives, consensus, and risk assessment.
+- Do not approve integration with stale evidence or unresolved verified critical/high findings.
 - Apply the Critical Feedback Protocol: lead with problems, not praise.
