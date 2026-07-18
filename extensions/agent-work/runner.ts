@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { appendFileSync, existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { BUILDER_CONTRACT, CRITICAL_FEEDBACK_PROTOCOL } from "./policy.ts";
+import { BUILDER_CONTRACT, CRITICAL_FEEDBACK_PROTOCOL, SUBAGENT_AMBIGUITY_PROTOCOL } from "./policy.ts";
 import type { RunResult, UsageRecord } from "./types.ts";
 
 export function piInvocation(args: string[]): { command: string; args: string[] } {
@@ -115,7 +115,12 @@ export async function writeSystemPrompt(
   const handoffRule = mode === "write"
     ? `Before finishing, write valid JSON to ${handoffPath} using the handoff contract below.`
     : "Your entire final response must be the handoff JSON below (without a Markdown fence); changedFiles must be empty. The coordinator will persist it.";
-  const extras = [CRITICAL_FEEDBACK_PROTOCOL, mode === "write" ? BUILDER_CONTRACT : "", extra].filter(Boolean).join("\n\n");
+  const extras = [
+    CRITICAL_FEEDBACK_PROTOCOL,
+    SUBAGENT_AMBIGUITY_PROTOCOL,
+    mode === "write" ? BUILDER_CONTRACT : "",
+    extra,
+  ].filter(Boolean).join("\n\n");
 
   const content = `${role}
 

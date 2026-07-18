@@ -10,7 +10,7 @@ This package is intentionally opinionated around a specific development setup:
 - **OpenRouter for delegated work.** Isolated scouts, builders, and reviewers default to metered OpenRouter models. This combines a strong subscription-backed coordinator with independently routed workers whose actual API spend can be measured and optimized. You therefore need both working Codex subscription authentication and an `OPENROUTER_API_KEY` for the intended setup.
 - **One-shot development.** The target workflow is to give a builder a sufficiently complete handoff that it can implement a feature correctly in one bounded attempt—not to discover core product decisions while coding.
 - **Specification effort is front-loaded.** Requirements are interviewed, challenged, stored as structured state, validated, and rendered into a builder handoff before writes are allowed. Acceptance criteria, non-goals, decisions, rejected alternatives, risks, and deferred questions should be explicit.
-- **The workflow is automatic.** Ask for a feature in normal language. The coordinator should initialize the feature, load the requirements interviewer, ask the necessary product questions, and advance the lifecycle without making you remember slash commands.
+- **The workflow is automatic.** Ask for a feature in normal language. The coordinator should initialize the feature, load the requirements interviewer, present high-impact questions via `agent_questionnaire` in TUI (chat fallback otherwise), and advance the lifecycle without making you remember slash commands.
 - **Review remains mandatory.** “One shot” does not mean blindly trusting the first result. Writing happens in an isolated worktree, then receives adversarial review before explicit integration.
 
 Models and routing weights are configurable, and the requirements gate can be forcibly bypassed, but doing so departs from the workflow this package is designed to support.
@@ -33,6 +33,7 @@ pi install /absolute/path/to/pi-agent-work
 
 - `agent_feature_init` — create feature + bootstrap requirements package
 - `agent_requirements` — init/validate/gaps/apply/render requirements state
+- `agent_questionnaire` — interactive 1–5 question requirements batch in TUI (tabs + review/submit); returns structured answers. In print/JSON/RPC modes returns `ui_unavailable` so the coordinator falls back to chat. Not available to isolated subagents (`--no-extensions`).
 - `agent_delegate` — isolated read-only or writing child with automatic cost/latency/quality routing (writes are gated)
 - `agent_router` — inspect routing policy and outcomes, or record accepted/corrected/failed feedback
 - `agent_inspect` — retrieve handoffs, events, invocation data, or full sessions
@@ -93,6 +94,7 @@ Write delegation requires a handoff-ready requirements package (or explicit `for
 - Do build / Do NOT build + decisions with rejected alternatives
 - Multi-perspective critique with independent verification of critical/high findings
 - Always-on Critical Feedback Protocol for coordinator and children
+- Interactive questionnaire is coordinator-only; subagents block on ambiguity instead of guessing
 
 ## Model routing
 

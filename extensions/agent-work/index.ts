@@ -14,6 +14,20 @@ import {
 } from "./critique.ts";
 import { CRITICAL_FEEDBACK_PROTOCOL, FEATURE_WORKFLOW_PROTOCOL, ROUTER_ORCHESTRATION_PROTOCOL, perspectivePrompt, perspectivesFor, type CritiqueDepth, type CritiqueTargetType } from "./policy.ts";
 import {
+  buildQuestionnaireParamsSchema,
+  cancelledResult,
+  errorResult,
+  normalizeQuestions,
+  QUESTIONNAIRE_DESCRIPTION,
+  QUESTIONNAIRE_PROMPT_GUIDELINES,
+  QUESTIONNAIRE_TOOL_NAME,
+  submittedResult,
+  uiUnavailableResult,
+  validateQuestions,
+} from "./questionnaire.ts";
+import { runQuestionnaireUi } from "./questionnaire-ui.ts";
+import { Text } from "@earendil-works/pi-tui";
+import {
   assertWriteGate,
   ensureRequirementsSession,
   renderRequirementsArtifacts,
@@ -592,6 +606,74 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event) => ({
     systemPrompt: `${event.systemPrompt}\n\n${CRITICAL_FEEDBACK_PROTOCOL}\n\n${FEATURE_WORKFLOW_PROTOCOL}\n\n${ROUTER_ORCHESTRATION_PROTOCOL}`,
   }));
+
+  pi.registerTool({
+    name: QUESTIONNAIRE_TOOL_NAME,
+    label: "Requirements Questionnaire",
+    description: QUESTIONNAIRE_DESCRIPTION,
+    promptSnippet: "Interactive 1–5 question requirements batch (TUI); chat fallback otherwise",
+    promptGuidelines: QUESTIONNAIRE_PROMPT_GUIDELINES,
+    parameters: buildQuestionnaireParamsSchema(Type) as any,
+    executionMode: "sequential",
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const normalized = normalizeQuestions(params.questions ?? []);
+      const invalid = validateQuestions(normalized);
+      if (invalid) return errorResult(invalid, normalized);
+
+      if (ctx.mode !== "tui") {
+        return uiUnavailableResult(normalized, ctx.mode);
+      }
+
+      const uiResult = await runQuestionnaireUi(ctx.ui.custom.bind(ctx.ui) as any, normalized);
+      if (uiResult.cancelled || uiResult.status === "cancelled") {
+        return cancelledResult(normalized);
+      }
+      return submittedResult(normalized, uiResult.answers);
+    },
+    renderCall(args, theme) {
+      const qs = (args as { questions?: { label?: string; id?: string }[] }).questions ?? [];
+      const count = qs.length;
+      const labels = qs.map((q) => q.label || q.id || "?").join(", ");
+      let text = theme.fg("toolTitle", theme.bold(`${QUESTIONNAIRE_TOOL_NAME} `));
+      text += theme.fg("muted", `${count} question${count !== 1 ? "s" : ""}`);
+      if (labels) text += theme.fg("dim", ` (${labels})`);
+      return new Text(text, 0, 0);
+    },
+    renderResult(result, _options, theme) {
+      const details = result.details as {
+        status?: string;
+        cancelled?: boolean;
+        answers?: {
+          id: string;
+          multiSelect?: boolean;
+          selections: { label: string; wasCustom: boolean; index?: number; value: string }[];
+        }[];
+      } | undefined;
+      if (!details) {
+        const text = result.content[0];
+        return new Text(text?.type === "text" ? text.text : "", 0, 0);
+      }
+      if (details.status === "cancelled" || details.cancelled) {
+        return new Text(theme.fg("warning", "Cancelled — continue in chat"), 0, 0);
+      }
+      if (details.status === "ui_unavailable") {
+        return new Text(theme.fg("warning", "UI unavailable — ask in chat"), 0, 0);
+      }
+      if (details.status === "error") {
+        const text = result.content[0];
+        return new Text(theme.fg("error", text?.type === "text" ? text.text : "Error"), 0, 0);
+      }
+      const lines = (details.answers ?? []).map((a) => {
+        const parts = a.selections.map((sel) => {
+          if (sel.wasCustom) return `${theme.fg("muted", "(wrote) ")}${sel.label}`;
+          const display = sel.index ? `${sel.index}. ${sel.label}` : sel.label;
+          return display;
+        });
+        return `${theme.fg("success", "✓ ")}${theme.fg("accent", a.id)}: ${parts.join("; ")}`;
+      });
+      return new Text(lines.join("\n") || theme.fg("muted", "No answers"), 0, 0);
+    },
+  });
 
   pi.registerTool({
     name: "agent_feature_init",

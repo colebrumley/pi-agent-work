@@ -44,12 +44,26 @@ Pick the smallest that fits: `tiny`, `small`, `medium`, `large`, `epic`.
 ## Interview loop
 
 1. Init or load/validate existing state.
-2. Run `gaps` and convert high-impact gaps into 3–5 numbered questions.
-3. Wait for answers. Do not invent requirements.
-4. Write a patch JSON and `apply` it.
-5. Repeat until handoff-ready, or user defers / accepts remaining risk.
-6. Render spec + handoff into the requirements directory.
-7. Tell the coordinator the requirements package path and any forced-risk notes.
+2. Run `gaps` and convert high-impact gaps into a batch of **1–5** numbered questions with stable ids, short labels, concrete option sets, and free-text where useful.
+3. **Prefer `agent_questionnaire` automatically** for each batch when running in TUI mode (no slash command, no asking the user whether to use the UI). Include multi-select only when several options may apply together.
+4. **Chat fallback:** if `agent_questionnaire` returns `status=ui_unavailable` or `status=cancelled`, or the session is print/JSON/RPC, ask the same questions conversationally. Do not block or treat fallback as failure.
+5. Wait for answers. Do not invent requirements.
+6. Write a patch JSON and `apply` it from the structured questionnaire details (or chat answers).
+7. Repeat until handoff-ready, or user defers / accepts remaining risk.
+8. Render spec + handoff into the requirements directory.
+9. Tell the coordinator the requirements package path and any forced-risk notes.
+
+## Questionnaire usage
+
+- Tool name: `agent_questionnaire`
+- Batch size: 1–5 questions
+- Each question: `id`, optional tab `label`, `prompt`, `options[{value,label,description?}]`, optional `multiSelect`, optional `allowOther` (default true)
+- Submitted answers arrive as structured `details.answers[]` with question ids, selected values/labels, and `wasCustom` markers—use these when authoring the patch
+- Cancellation / UI-unavailable → continue in chat with the same batch
+
+## Subagents
+
+Isolated subagents do **not** receive `agent_questionnaire`. If a builder/scout/reviewer is blocked on product ambiguity, it must hand back `status=blocked` with the clarification needed. The coordinator resolves it here (questionnaire or chat) and redispatches. Never tell subagents to guess defaults.
 
 ## Patch rules
 

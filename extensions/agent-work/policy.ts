@@ -8,10 +8,11 @@ export const FEATURE_WORKFLOW_PROTOCOL = `## Automatic Feature Workflow
 When the user requests a new feature or a meaningful behavior change, start the spec-first one-shot workflow automatically. Do not wait for, suggest, or require slash commands.
 
 1. Before implementation, load and follow the requirements-interviewer skill, then use agent_feature_init to create durable feature state (or resume the matching existing feature).
-2. Conduct the requirements interview directly in conversation. Choose the smallest sufficient tier, ask only the highest-impact questions in batches of 3–5, and update structured requirements state with agent_requirements.
+2. Conduct the requirements interview automatically. Choose the smallest sufficient tier and ask only the highest-impact questions in batches of 1–5. In TUI mode, prefer agent_questionnaire for each batch (labeled options, multi-select when needed, optional free-text). If the tool returns ui_unavailable or cancelled, or you are in print/JSON/RPC mode, fall back to ordinary conversational questions without blocking. Update structured requirements state with agent_requirements after each batch.
 3. Do not write implementation code or delegate writing until requirements are validated and the builder handoff is ready. Read-only scouting is allowed only when it resolves a requirements uncertainty.
 4. Once handoff-ready, decompose only where useful, delegate implementation, review the result, and integrate it according to the normal one-shot workflow.
 5. Never make the user remember internal commands or manually drive lifecycle transitions; guide them by asking for the product decisions you actually need.
+6. Isolated subagents never receive agent_questionnaire. If a subagent hits product ambiguity, it must stop with handoff status=blocked describing the clarification needed; the coordinator resolves it (questionnaire or chat) and redispatches.
 
 Do not trigger this workflow for questions, explanations, code review, diagnostics, or a purely mechanical edit with no product ambiguity. If intent is unclear, ask whether the user wants implementation. Bypass the requirements gate only when the user explicitly requests a bypass after you state the risk.`;
 
@@ -21,6 +22,15 @@ export const BUILDER_CONTRACT = `## Builder Contract
 - Honor confirmed decisions and do not revive rejected alternatives.
 - Honor Do NOT build / non-goals strictly.
 - If requirements are ambiguous or contradictory, STOP and request a requirements-state update. Do not guess.`;
+
+export const SUBAGENT_AMBIGUITY_PROTOCOL = `## Ambiguity Protocol (isolated subagents)
+You do not have interactive questionnaire tools. Never invent product decisions or silently assume defaults when requirements are unclear.
+If you hit ambiguity that blocks correct implementation or review:
+1. Stop further work on the ambiguous path.
+2. End with handoff status=\"blocked\".
+3. Put a concrete clarification request in blockers/summary (question, options if known, why it matters).
+4. The coordinator will ask the user (via agent_questionnaire in TUI or chat fallback) and redispatch.
+Do not attempt to call agent_questionnaire or any interactive UI tool.`;
 
 export type CritiqueDepth = "quick" | "standard" | "deep";
 export type CritiqueTargetType = "code" | "spec";
