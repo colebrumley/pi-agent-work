@@ -37,6 +37,15 @@ import {
   runRequirementsCli,
 } from "./requirements.ts";
 import { runPi, piInvocation, writeSystemPrompt } from "./runner.ts";
+import {
+  cancelActiveOperation,
+  findProgressTimelines,
+  formatProgress,
+  getActiveOperation,
+  listActiveOperations,
+  ProgressMonitor,
+  readProgressTimeline,
+} from "./progress.ts";
 import { loadRouterConfig, routeTask, routerConfigPath, type RouteComplexity, type RouteRisk } from "./router.ts";
 import {
   appendJsonl,
@@ -61,7 +70,7 @@ import {
   writeStatus,
 } from "./storage.ts";
 import { registerStatusFooter } from "./status-footer.ts";
-import { SCHEMA_VERSION, type Handoff, type InvocationRecord, type SessionReference, type TaskMode, type TaskRecord } from "./types.ts";
+import { SCHEMA_VERSION, type Handoff, type InvocationRecord, type ProgressEvent, type ProgressOperationKind, type SessionReference, type TaskMode, type TaskRecord } from "./types.ts";
 
 const execFileAsync = promisify(execFile);
 const OUTPUT_LIMIT = 40_000;
@@ -82,9 +91,9 @@ async function withRootLock<T>(root: string, operation: () => Promise<T>): Promi
   }
 }
 
-async function command(cmd: string, args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> {
+async function command(cmd: string, args: string[], cwd: string, signal?: AbortSignal): Promise<{ stdout: string; stderr: string }> {
   try {
-    const result = await execFileAsync(cmd, args, { cwd, maxBuffer: 10 * 1024 * 1024 });
+    const result = await execFileAsync(cmd, args, { cwd, maxBuffer: 10 * 1024 * 1024, signal });
     return { stdout: result.stdout, stderr: result.stderr };
   } catch (error: any) {
     const message = [error?.message, error?.stdout, error?.stderr].filter(Boolean).join("\n");
@@ -181,6 +190,19 @@ function buildChildArgs(input: {
   return args;
 }
 
+type ProgressCallback = (text: string, event?: ProgressEvent) => void;
+
+function operationKind(profile: string, explicit?: ProgressOperationKind): ProgressOperationKind {
+  if (explicit) return explicit;
+  if (profile === "critique-verifier") return "verification";
+  if (profile === "reviewer" || profile.startsWith("critique-")) return "review";
+  return "delegation";
+}
+
+function operationId(kind: ProgressOperationKind, featureId: string, taskId: string, attempt: number): string {
+  return `${kind}-${featureId}-${taskId}-a${attempt}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 async function runTask(
   root: string,
   input: {
@@ -201,10 +223,13 @@ async function runTask(
     systemExtra?: string;
     forceRequirements?: boolean;
     skipRequirementsGate?: boolean;
+    hardTimeoutMs?: number;
+    operationKind?: ProgressOperationKind;
+    operationId?: string;
   },
   signal: AbortSignal | undefined,
-  onProgress?: (text: string) => void,
-): Promise<{ receipt: string; finalText: string; attemptPath: string; sessionFile?: string }> {
+  onProgress?: ProgressCallback,
+): Promise<{ receipt: string; finalText: string; attemptPath: string; sessionFile?: string; operationId: string }> {
   const feature = await assertFeature(root, input.featureId);
   const featureId = feature.id;
   const taskId = safeId(input.taskId, "task id");
@@ -255,6 +280,21 @@ async function runTask(
   });
   await atomicJson(join(attemptPath, "artifacts", "index.json"), { schemaVersion: SCHEMA_VERSION, artifacts: [] });
 
+  const kind = operationKind(input.profile, input.operationKind);
+  const currentOperationId = input.operationId ?? operationId(kind, featureId, taskId, attempt);
+  const monitor = await ProgressMonitor.start({
+    root,
+    featureId,
+    taskId,
+    attempt,
+    operationId: currentOperationId,
+    operation: kind,
+    phase: "preparing",
+    hardTimeoutMs: input.hardTimeoutMs,
+    onDelivery: onProgress ? (event) => onProgress(formatProgress(event), event) : undefined,
+  });
+  if (input.retry) await monitor.milestone("Explicit retry attempt started");
+
   const status = await readStatus(root, featureId, taskId);
   Object.assign(status, {
     state: "running",
@@ -265,7 +305,9 @@ async function runTask(
   });
   await writeStatus(root, status);
 
+  try {
   if (input.mode === "write" && !input.skipRequirementsGate) {
+    await monitor.phaseChange("requirements", "Checking requirements gate");
     try {
       const gate = await assertWriteGate(root, featureId, { force: input.forceRequirements });
       builderHandoffPath = gate.handoffPath;
@@ -279,6 +321,7 @@ async function runTask(
   }
 
   if (input.mode === "write") {
+    await monitor.phaseChange("isolating", "Preparing isolated worktree");
     try {
       await command("git", ["rev-parse", "--is-inside-work-tree"], root);
       branch = `agent-work/${safeId(featureId)}/${taskId}/a${attempt}`;
@@ -299,6 +342,7 @@ async function runTask(
     }
   }
 
+  await monitor.phaseChange("launching", "Preparing child invocation");
   await writeSystemPrompt(systemPromptPath, input.profile, handoffPath, input.mode, input.systemExtra ?? "");
   const brief = await readFile(join(featureDir(root, featureId), "brief.md"), "utf8");
   const builderHandoff = builderHandoffPath && await exists(builderHandoffPath)
@@ -352,8 +396,8 @@ async function runTask(
     timestamp: route.timestamp, type: "route", featureId, taskId, attempt, ...route,
   });
 
-  try {
-    const run = await runPi({ cwd: childCwd, args, eventsFile, signal, onProgress });
+    await monitor.phaseChange(kind === "review" ? "reviewing" : kind === "verification" ? "verifying" : "delegating", "Child process launched");
+    const run = await runPi({ cwd: childCwd, args, eventsFile, signal, monitor });
     invocationRecord.completedAt = now();
     invocationRecord.durationMs = Date.parse(invocationRecord.completedAt) - Date.parse(invocationRecord.startedAt);
     invocationRecord.usage = run.usage;
@@ -380,11 +424,13 @@ async function runTask(
         timestamp: now(), type: "outcome", featureId, taskId, attempt, model: selectedModel,
         state: status.state, durationMs: invocationRecord.durationMs, usage: run.usage, correction: attempt > 1,
       });
+      await monitor.terminal("failure", "Child process failed; inspect persisted diagnostics");
       return {
         receipt: finalReceipt({ featureId, taskId, attempt, state: status.state, attemptPath, sessionFile, summary: status.message }),
         finalText: run.finalText,
         attemptPath,
         sessionFile,
+        operationId: currentOperationId,
       };
     }
 
@@ -426,11 +472,13 @@ async function runTask(
           timestamp: now(), type: "outcome", featureId, taskId, attempt, model: selectedModel,
           state: status.state, durationMs: invocationRecord.durationMs, usage: run.usage, correction: attempt > 1,
         });
+        await monitor.terminal("failure", status.message);
         return {
           receipt: finalReceipt({ featureId, taskId, attempt, state: status.state, attemptPath, sessionFile, summary: status.message }),
           finalText: run.finalText,
           attemptPath,
           sessionFile,
+          operationId: currentOperationId,
         };
       }
     }
@@ -471,20 +519,24 @@ async function runTask(
       state: status.state, durationMs: invocationRecord.durationMs, usage: run.usage,
       correction: attempt > 1,
     });
+    await monitor.terminal(handoff.status === "done" ? "success" : "failure", handoff.status === "done" ? "Task completed" : `Task reported ${handoff.status}`);
     return {
       receipt: finalReceipt({ featureId, taskId, attempt, state: status.state, attemptPath, sessionFile, commit, summary: handoff.summary }),
       finalText: run.finalText || handoff.summary,
       attemptPath,
       sessionFile,
+      operationId: currentOperationId,
     };
   } catch (error: any) {
-    status.state = signal?.aborted ? "cancelled" : "failed";
+    const terminal = monitor.snapshot().terminal;
+    status.state = signal?.aborted || terminal === "cancelled" ? "cancelled" : "failed";
     status.message = error?.message ?? String(error);
     await writeStatus(root, status);
     await appendJsonl(join(rootDir(root), "routing-decisions.jsonl"), {
       timestamp: now(), type: "outcome", featureId, taskId, attempt, model: selectedModel,
       state: status.state, correction: attempt > 1, error: status.message,
     });
+    if (!monitor.isTerminal) await monitor.terminal(signal?.aborted ? "cancelled" : "failure", signal?.aborted ? "Task cancelled" : `${kind} failed; inspect persisted diagnostics`);
     throw error;
   }
 }
@@ -503,15 +555,17 @@ async function runMultiPerspectiveReview(
     retry?: boolean;
   },
   signal: AbortSignal | undefined,
-  onProgress?: (text: string) => void,
+  onProgress?: ProgressCallback,
+  monitor?: ProgressMonitor,
 ): Promise<string> {
   const perspectives = perspectivesFor(input.targetType, input.depth);
   const attackFindings: CritiqueFinding[] = [];
   const reviewRootTask = safeId(`${input.taskId}-critique`);
 
-  for (const perspective of perspectives) {
+  for (const [perspectiveIndex, perspective] of perspectives.entries()) {
     if (signal?.aborted) throw new Error("Subagent aborted");
-    onProgress?.(`Attacking via ${perspective}...`);
+    await monitor?.phaseChange("reviewing", `Reviewing via ${perspective}`, { completed: perspectiveIndex, active: 1, total: perspectives.length });
+    onProgress?.(`Reviewing via ${perspective}`);
     const result = await runTask(root, {
       featureId: input.featureId,
       taskId: `${reviewRootTask}-${perspective}`,
@@ -537,6 +591,7 @@ async function runMultiPerspectiveReview(
       systemExtra: "You are a critique attacker. Stay in your assigned perspective.",
     }, signal, onProgress);
     attackFindings.push(...parseFindings(result.finalText, perspective));
+    await monitor?.milestone(`Completed ${perspective} review`, { completed: perspectiveIndex + 1, active: 0, total: perspectives.length });
   }
 
   let findings = dedupeFindings(attackFindings);
@@ -547,7 +602,8 @@ async function runMultiPerspectiveReview(
 
   for (const [index, finding] of verifyPool.entries()) {
     if (signal?.aborted) throw new Error("Subagent aborted");
-    onProgress?.(`Verifying ${finding.severity} finding ${index + 1}/${verifyPool.length}...`);
+    await monitor?.phaseChange("verifying", `Verifying finding ${index + 1}/${verifyPool.length}`, { completed: index, active: 1, total: verifyPool.length });
+    onProgress?.(`Verifying ${finding.severity} finding ${index + 1}/${verifyPool.length}`);
     const result = await runTask(root, {
       featureId: input.featureId,
       taskId: `${reviewRootTask}-verify-${index + 1}`,
@@ -585,6 +641,7 @@ async function runMultiPerspectiveReview(
     }
     finding.verification = { verdict: verdict.verdict, note: verdict.note };
     if (verdict.verdict === "false-positive") dropped.push(finding);
+    await monitor?.milestone(`Verified finding ${index + 1}/${verifyPool.length}`, { completed: index + 1, active: 0, total: verifyPool.length });
   }
 
   findings = findings.filter((f) => f.verification?.verdict !== "false-positive");
@@ -780,6 +837,7 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       prefer: Type.Optional(StringEnum(["cost", "speed", "quality", "balanced"] as const)),
       retry: Type.Optional(Type.Boolean()),
       forceRequirements: Type.Optional(Type.Boolean({ description: "Allow write delegation with a forced risk-flagged requirements handoff" })),
+      hardTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional operation timeout; disabled by default" })),
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
       const root = await projectRoot(ctx.cwd);
@@ -798,8 +856,10 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
         prefer: params.prefer,
         retry: params.retry,
         forceRequirements: params.forceRequirements,
-      }, signal, (progress) => onUpdate?.({ content: [{ type: "text", text: progress }], details: {} }));
-      return { content: [{ type: "text", text: result.receipt }], details: { attemptPath: result.attemptPath, sessionFile: result.sessionFile } };
+        hardTimeoutMs: params.hardTimeoutMs,
+        operationId: _id,
+      }, signal, (progress, event) => onUpdate?.({ content: [{ type: "text", text: progress }], details: { progress: event } }));
+      return { content: [{ type: "text", text: result.receipt }], details: { attemptPath: result.attemptPath, sessionFile: result.sessionFile, operationId: result.operationId } };
     },
   });
 
@@ -862,6 +922,46 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "agent_operation",
+    label: "Agent Operation",
+    description: "Inspect, replay, list, or cancel durable delegated-work progress operations.",
+    parameters: Type.Object({
+      action: StringEnum(["status", "replay", "list", "cancel"] as const),
+      operationId: Type.Optional(Type.String()),
+      featureId: Type.Optional(Type.String()),
+      taskId: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params, _signal, _update, ctx) {
+      const root = await projectRoot(ctx.cwd);
+      if (params.action === "cancel") {
+        if (!params.operationId) throw new Error("cancel requires operationId");
+        const cancelled = await cancelActiveOperation(params.operationId);
+        if (!cancelled) throw new Error(`Operation is not active: ${params.operationId}`);
+        return { content: [{ type: "text", text: `Cancelled ${params.operationId}; no automatic retry was started.` }], details: { operationId: params.operationId, cancelled: true } };
+      }
+      if (params.action === "status") {
+        if (!params.operationId) throw new Error("status requires operationId");
+        const active = getActiveOperation(params.operationId);
+        const timeline = active ? [] : await readProgressTimeline(root, params.operationId);
+        const status = active ?? timeline.at(-1);
+        if (!status) throw new Error(`Unknown operation: ${params.operationId}`);
+        return { content: [{ type: "text", text: formatProgress(status) }], details: { progress: status, active: Boolean(active) } };
+      }
+      if (params.action === "replay") {
+        if (!params.operationId) throw new Error("replay requires operationId");
+        const timeline = await readProgressTimeline(root, params.operationId);
+        return { content: [{ type: "text", text: truncate(timeline.map(formatProgress).join("\n")) }], details: { operationId: params.operationId, timeline } };
+      }
+      const active = listActiveOperations().filter((event) =>
+        (!params.featureId || event.featureId === params.featureId) && (!params.taskId || event.taskId === params.taskId));
+      const persisted = await findProgressTimelines(root, { featureId: params.featureId, taskId: params.taskId });
+      const latest = persisted.map((timeline) => timeline.at(-1)!).filter((event) => !active.some((item) => item.operationId === event.operationId));
+      const operations = [...active, ...latest];
+      return { content: [{ type: "text", text: operations.length ? operations.map(formatProgress).join("\n") : "No matching operations." }], details: { operations, active: active.map((event) => event.operationId) } };
+    },
+  });
+
+  pi.registerTool({
     name: "agent_inspect",
     label: "Inspect Agent Work",
     description: "Read a task handoff, status, full event stream, or persistent child session on demand.",
@@ -901,6 +1001,7 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       question: Type.String(),
       attempt: Type.Optional(Type.Integer({ minimum: 1 })),
       allowChanges: Type.Optional(Type.Boolean({ description: "Allow a writing worker to revise its worktree and amend its task commit" })),
+      hardTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional operation timeout; disabled by default" })),
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
       const root = await projectRoot(ctx.cwd);
@@ -923,7 +1024,19 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
         "--no-extensions", "--no-skills", "--no-prompt-templates",
         question,
       ];
-      const result = await runPi({ cwd: session.cwd, args, eventsFile: queryFile, signal, onProgress: (text) => onUpdate?.({ content: [{ type: "text", text }], details: {} }) });
+      const monitor = await ProgressMonitor.start({
+        root,
+        featureId: params.featureId,
+        taskId: params.taskId,
+        attempt,
+        operationId: _id,
+        operation: "follow-up",
+        phase: "follow-up",
+        hardTimeoutMs: params.hardTimeoutMs,
+        onDelivery: (event) => onUpdate?.({ content: [{ type: "text", text: formatProgress(event) }], details: { progress: event } }),
+      });
+      try {
+      const result = await runPi({ cwd: session.cwd, args, eventsFile: queryFile, signal, monitor });
       let amendedCommit: string | undefined;
       if (params.allowChanges && result.exitCode === 0) {
         const changes = (await command("git", ["status", "--porcelain"], session.cwd)).stdout.trim();
@@ -949,10 +1062,15 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
         });
       }
       const response = truncate(result.finalText || result.stderr || "(no response)");
+      await monitor.terminal(result.exitCode === 0 ? "success" : "failure", result.exitCode === 0 ? "Follow-up completed" : `Follow-up exited ${result.exitCode}`);
       return {
         content: [{ type: "text", text: amendedCommit ? `${response}\n\nAmended task commit: ${amendedCommit}` : response }],
-        details: { session: session.file, eventsFile: queryFile, commit: amendedCommit },
+        details: { session: session.file, eventsFile: queryFile, commit: amendedCommit, operationId: _id },
       };
+      } catch (error: any) {
+        if (!monitor.isTerminal) await monitor.terminal(signal?.aborted ? "cancelled" : "failure", signal?.aborted ? "Follow-up cancelled" : "Follow-up failed; inspect persisted diagnostics");
+        throw error;
+      }
     },
   });
 
@@ -970,6 +1088,7 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)),
       retry: Type.Optional(Type.Boolean()),
       singleReviewer: Type.Optional(Type.Boolean({ description: "Fallback to one general reviewer instead of multi-perspective critique" })),
+      hardTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional operation timeout; disabled by default" })),
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
       const root = await projectRoot(ctx.cwd);
@@ -990,22 +1109,55 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
           retry: params.retry,
           cwdOverride: source.worktree,
           skipRequirementsGate: true,
-        }, signal, (progress) => onUpdate?.({ content: [{ type: "text", text: progress }], details: {} }));
-        return { content: [{ type: "text", text: result.receipt }], details: {} };
+          hardTimeoutMs: params.hardTimeoutMs,
+          operationKind: "review",
+          operationId: _id,
+        }, signal, (progress, event) => onUpdate?.({ content: [{ type: "text", text: progress }], details: { progress: event } }));
+        return { content: [{ type: "text", text: result.receipt }], details: { operationId: result.operationId } };
       }
 
-      const report = await runMultiPerspectiveReview(root, {
+      const depth = params.depth ?? "standard";
+      const total = perspectivesFor(params.targetType ?? "code", depth).length;
+      const monitor = await ProgressMonitor.start({
+        root,
         featureId: params.featureId,
         taskId: params.taskId,
-        worktree: source.worktree,
-        depth: params.depth ?? "standard",
-        targetType: params.targetType ?? "code",
-        model: params.model,
-        thinking: params.thinking,
-        prompt: params.prompt,
-        retry: params.retry,
-      }, signal, (progress) => onUpdate?.({ content: [{ type: "text", text: progress }], details: {} }));
-      return { content: [{ type: "text", text: report }], details: {} };
+        attempt: source.currentAttempt,
+        operationId: _id,
+        operation: "review",
+        phase: "reviewing",
+        counts: { completed: 0, active: 1, total },
+        hardTimeoutMs: params.hardTimeoutMs,
+        onDelivery: (event) => onUpdate?.({ content: [{ type: "text", text: formatProgress(event) }], details: { progress: event } }),
+      });
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      monitor.setCancelHandler(abort);
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
+      try {
+        const report = await runMultiPerspectiveReview(root, {
+          featureId: params.featureId,
+          taskId: params.taskId,
+          worktree: source.worktree,
+          depth,
+          targetType: params.targetType ?? "code",
+          model: params.model,
+          thinking: params.thinking,
+          prompt: params.prompt,
+          retry: params.retry,
+        }, controller.signal, (progress, event) => {
+          monitor.observe({ type: "message_update" });
+          onUpdate?.({ content: [{ type: "text", text: progress }], details: { progress: event } });
+        }, monitor);
+        await monitor.terminal("success", "Multi-perspective review completed");
+        return { content: [{ type: "text", text: report }], details: { operationId: _id } };
+      } catch (error: any) {
+        if (!monitor.isTerminal) await monitor.terminal(controller.signal.aborted ? "cancelled" : "failure", controller.signal.aborted ? "Review cancelled" : "Review failed; inspect persisted diagnostics");
+        throw error;
+      } finally {
+        signal?.removeEventListener("abort", abort);
+      }
     },
   });
 
@@ -1013,8 +1165,12 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
     name: "agent_integrate",
     label: "Integrate Task",
     description: "Cherry-pick a reviewed writing task's isolated commit into the coordinator worktree.",
-    parameters: Type.Object({ featureId: Type.String(), taskId: Type.String() }),
-    async execute(_id, params, _signal, _update, ctx) {
+    parameters: Type.Object({
+      featureId: Type.String(),
+      taskId: Type.String(),
+      hardTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional operation timeout; disabled by default" })),
+    }),
+    async execute(_id, params, signal, onUpdate, ctx) {
       const root = await projectRoot(ctx.cwd);
       const status = await readStatus(root, params.featureId, params.taskId);
       if (status.state !== "review") throw new Error(`Task must be in review state, currently: ${status.state}`);
@@ -1026,20 +1182,44 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
           throw new Error(`Dependency ${dependency} is not complete: ${dependencyStatus.state}`);
         }
       }
-      await withRootLock(root, async () => {
-        await assertClean(root);
-        await command("git", ["cherry-pick", status.commit!], root);
-      });
-      status.state = "integrated";
-      status.message = `Integrated ${status.commit}`;
-      await writeStatus(root, status);
-      await appendJsonl(join(featureDir(root, params.featureId), "decisions.jsonl"), {
-        timestamp: now(),
-        type: "integration",
+      const monitor = await ProgressMonitor.start({
+        root,
+        featureId: params.featureId,
         taskId: params.taskId,
-        commit: status.commit,
+        attempt: status.currentAttempt,
+        operationId: _id,
+        operation: "integration",
+        phase: "integrating",
+        hardTimeoutMs: params.hardTimeoutMs,
+        onDelivery: (event) => onUpdate?.({ content: [{ type: "text", text: formatProgress(event) }], details: { progress: event } }),
       });
-      return { content: [{ type: "text", text: `Integrated ${params.taskId} via ${status.commit}` }], details: { commit: status.commit } };
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      monitor.setCancelHandler(abort);
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
+      try {
+        await withRootLock(root, async () => {
+          await assertClean(root);
+          await command("git", ["cherry-pick", status.commit!], root, controller.signal);
+        });
+        status.state = "integrated";
+        status.message = `Integrated ${status.commit}`;
+        await writeStatus(root, status);
+        await appendJsonl(join(featureDir(root, params.featureId), "decisions.jsonl"), {
+          timestamp: now(),
+          type: "integration",
+          taskId: params.taskId,
+          commit: status.commit,
+        });
+        await monitor.terminal("success", "Task integrated");
+        return { content: [{ type: "text", text: `Integrated ${params.taskId} via ${status.commit}` }], details: { commit: status.commit, operationId: _id } };
+      } catch (error: any) {
+        if (!monitor.isTerminal) await monitor.terminal(controller.signal.aborted ? "cancelled" : "failure", controller.signal.aborted ? "Integration cancelled" : "Integration failed; inspect persisted diagnostics");
+        throw error;
+      } finally {
+        signal?.removeEventListener("abort", abort);
+      }
     },
   });
 }

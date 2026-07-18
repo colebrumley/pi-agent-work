@@ -36,6 +36,7 @@ pi install /absolute/path/to/pi-agent-work
 - `agent_questionnaire` — interactive 1–5 question requirements batch in TUI (tabs + review/submit); returns structured answers. In print/JSON/RPC modes returns `ui_unavailable` so the coordinator falls back to chat. Not available to isolated subagents (`--no-extensions`).
 - `agent_delegate` — isolated read-only or writing child with automatic cost/latency/quality routing (writes are gated)
 - `agent_router` — inspect routing policy and outcomes, or record accepted/corrected/failed feedback
+- `agent_operation` — inspect/replay durable progress, list active operations, or cancel one without automatic retry
 - `agent_inspect` — retrieve handoffs, events, invocation data, or full sessions
 - `agent_ask` — resume the exact child session for follow-up or revision
 - `agent_review` — multi-perspective critique + independent high/critical verification
@@ -54,6 +55,7 @@ Optional explicit skill command: `/skill:requirements-interviewer`
 ├── manifest.json
 ├── router.json                 # editable model utility policy
 ├── routing-decisions.jsonl     # routes, actual usage/cost/latency, corrections
+├── progress/<operation-id>.jsonl # correlated durable progress for TUI/API/resume
 └── features/<feature-id>/
     ├── brief.md
     ├── feature.json
@@ -86,6 +88,12 @@ pending → running → review → integrated
 ```
 
 Write delegation requires a handoff-ready requirements package (or explicit `forceRequirements`).
+
+## Progress and cancellation
+
+Delegation, review, verification, follow-up, and integration emit an immediate start update, meaningful phase/milestone updates, and a heartbeat every 20 seconds. After 60 seconds without child output or structured-event activity, the monitor checks liveness and warns every 60 seconds until activity resumes. Silence does not abort a live child; optional `hardTimeoutMs` is disabled by default.
+
+Every update carries feature/task/attempt/operation IDs and is appended to `.agent-work/progress/` before best-effort live delivery. Use `agent_operation` to inspect, replay, list, or cancel. Cancellation terminates the child process tree, keeps artifacts/diagnostics, records one terminal event, and never automatically retries.
 
 ## Design contracts
 

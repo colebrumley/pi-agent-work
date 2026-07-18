@@ -11,7 +11,8 @@
     { "$ref": "#/$defs/invocation" },
     { "$ref": "#/$defs/route" },
     { "$ref": "#/$defs/session" },
-    { "$ref": "#/$defs/handoff" }
+    { "$ref": "#/$defs/handoff" },
+    { "$ref": "#/$defs/progress" }
   ],
   "$defs": {
     "base": {
@@ -140,6 +141,32 @@
           "properties": {
             "id": { "type": "string" }, "file": { "type": "string" }, "eventsFile": { "type": "string" },
             "cwd": { "type": "string" }, "updatedAt": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    },
+    "progress": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["sequence", "timestamp", "featureId", "taskId", "attempt", "operationId", "operation", "kind", "elapsedMs", "phase", "counts", "lastMilestone", "summary", "activity"],
+          "properties": {
+            "sequence": { "type": "integer", "minimum": 1 },
+            "timestamp": { "type": "string", "format": "date-time" },
+            "featureId": { "type": "string" }, "taskId": { "type": "string" },
+            "attempt": { "type": "integer", "minimum": 1 }, "operationId": { "type": "string" },
+            "operation": { "enum": ["delegation", "review", "verification", "follow-up", "integration"] },
+            "kind": { "enum": ["start", "phase", "milestone", "heartbeat", "stall", "recovery", "retry", "terminal"] },
+            "elapsedMs": { "type": "integer", "minimum": 0 }, "phase": { "type": "string" },
+            "counts": {
+              "type": "object", "required": ["completed", "active"],
+              "properties": { "completed": { "type": "integer", "minimum": 0 }, "active": { "type": "integer", "minimum": 0 }, "total": { "type": "integer", "minimum": 0 } }
+            },
+            "lastMilestone": { "type": "string" }, "summary": { "type": "string" },
+            "activity": { "enum": ["active", "inactive", "cancelled"] },
+            "terminal": { "enum": ["success", "failure", "timeout", "cancelled", "unreachable"] },
+            "deliveryDegraded": { "type": "boolean" }
           }
         }
       ]

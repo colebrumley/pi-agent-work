@@ -1,8 +1,9 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { BUILDER_CONTRACT, CRITICAL_FEEDBACK_PROTOCOL, SUBAGENT_AMBIGUITY_PROTOCOL } from "./policy.ts";
+import type { ProgressMonitor } from "./progress.ts";
 import type { RunResult, UsageRecord } from "./types.ts";
 
 export function piInvocation(args: string[]): { command: string; args: string[] } {
@@ -22,34 +23,73 @@ function assistantText(message: any): string {
   return message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join("\n");
 }
 
+function terminateProcessTree(child: ChildProcess): void {
+  if (!child.pid || child.exitCode !== null) return;
+  try {
+    if (process.platform === "win32") {
+      const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+      killer.unref();
+    } else {
+      process.kill(-child.pid, "SIGTERM");
+    }
+  } catch {
+    try { child.kill("SIGTERM"); } catch { /* already exited */ }
+  }
+}
+
+function forceKillProcessTree(child: ChildProcess): void {
+  if (!child.pid || child.exitCode !== null) return;
+  try {
+    if (process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
+    else child.kill("SIGKILL");
+  } catch {
+    try { child.kill("SIGKILL"); } catch { /* already exited */ }
+  }
+}
+
 export async function runPi(options: {
   cwd: string;
   args: string[];
   eventsFile: string;
   signal?: AbortSignal;
   onProgress?: (text: string) => void;
+  monitor?: ProgressMonitor;
+  invocation?: { command: string; args: string[] };
 }): Promise<RunResult> {
   await mkdir(join(options.eventsFile, ".."), { recursive: true });
-  const invocation = piInvocation(options.args);
+  const invocation = options.invocation ?? piInvocation(options.args);
   let stderr = "";
   let buffer = "";
   let finalText = "";
   let sessionId: string | undefined;
   let aborted = false;
+  let childError: Error | undefined;
   const usage: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
 
-  const exitCode = await new Promise<number>((resolve, reject) => {
+  const exitCode = await new Promise<number>((resolve) => {
     const child = spawn(invocation.command, invocation.args, {
       cwd: options.cwd,
       shell: false,
+      detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
+    let closed = false;
+
+    const kill = () => {
+      if (closed) return;
+      terminateProcessTree(child);
+      // Cancellation is decisive: kill the whole Unix process group, not only the direct child.
+      if (process.platform !== "win32") forceKillProcessTree(child);
+    };
+    options.monitor?.setCancelHandler(kill);
 
     const consume = (line: string) => {
       if (!line.trim()) return;
       appendFileSync(options.eventsFile, `${line}\n`, "utf8");
+      options.monitor?.observe({ type: "output_activity" });
       try {
         const event = JSON.parse(line);
+        options.monitor?.observe(event);
         if (event.type === "session" && typeof event.id === "string") sessionId = event.id;
         if (event.type === "message_end") {
           const text = assistantText(event.message);
@@ -63,37 +103,54 @@ export async function runPi(options: {
           }
           if (text) {
             finalText = text;
-            options.onProgress?.(text.slice(-1000));
+            if (!options.monitor) options.onProgress?.("Agent response turn completed");
           }
         }
       } catch {
-        // Preserve malformed lines in the event log; stderr will carry process errors.
+        // Malformed lines remain in the raw event log but are never exposed as progress.
       }
     };
 
-    child.stdout.on("data", (chunk) => {
+    child.stdout?.on("data", (chunk) => {
       buffer += chunk.toString();
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       for (const line of lines) consume(line);
     });
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-    child.on("error", reject);
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+      options.monitor?.observe({ type: "output_activity" });
+    });
+    child.on("error", (error) => {
+      childError = error;
+      void options.monitor?.terminal("failure", "Child process failed to start");
+    });
     child.on("close", (code) => {
+      closed = true;
       if (buffer.trim()) consume(buffer);
+      options.signal?.removeEventListener("abort", abortListener);
+      void options.monitor?.milestone(code === 0 ? "Child process exited" : `Child process exited with code ${code ?? 1}`);
       resolve(code ?? 1);
     });
 
-    const kill = () => {
+    const abortListener = () => {
       aborted = true;
-      child.kill("SIGTERM");
-      setTimeout(() => { if (!child.killed) child.kill("SIGKILL"); }, 5000).unref();
+      if (options.monitor) void options.monitor.cancel("Cancelled by coordinator or user");
+      else kill();
     };
-    if (options.signal?.aborted) kill();
-    else options.signal?.addEventListener("abort", kill, { once: true });
+    if (options.signal?.aborted) abortListener();
+    else options.signal?.addEventListener("abort", abortListener, { once: true });
+
+    // The monitor invokes this check after structured-output inactivity.
+    options.monitor?.setLivenessCheck(() => !closed && child.exitCode === null);
   });
 
-  if (aborted) throw new Error("Subagent aborted");
+  await options.monitor?.flush();
+  if (childError) throw childError;
+  const terminal = options.monitor?.snapshot().terminal;
+  if (terminal === "timeout") throw new Error("Subagent exceeded its configured hard timeout");
+  if (terminal === "unreachable") throw new Error("Subagent became unreachable");
+  if (aborted || terminal === "cancelled") throw new Error("Subagent aborted");
   return { exitCode, stderr, finalText, sessionId, usage };
 }
 

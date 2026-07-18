@@ -2,6 +2,34 @@ export const SCHEMA_VERSION = 1;
 
 export type TaskMode = "read" | "write";
 export type TaskState = "pending" | "running" | "review" | "done" | "blocked" | "failed" | "cancelled" | "integrated";
+export type ProgressOperationKind = "delegation" | "review" | "verification" | "follow-up" | "integration";
+export type ProgressTerminalState = "success" | "failure" | "timeout" | "cancelled" | "unreachable";
+
+export interface ProgressCounts {
+  completed: number;
+  active: number;
+  total?: number;
+}
+
+export interface ProgressEvent {
+  schemaVersion: number;
+  sequence: number;
+  timestamp: string;
+  featureId: string;
+  taskId: string;
+  attempt: number;
+  operationId: string;
+  operation: ProgressOperationKind;
+  kind: "start" | "phase" | "milestone" | "heartbeat" | "stall" | "recovery" | "retry" | "terminal";
+  elapsedMs: number;
+  phase: string;
+  counts: ProgressCounts;
+  lastMilestone: string;
+  summary: string;
+  activity: "active" | "inactive" | "cancelled";
+  terminal?: ProgressTerminalState;
+  deliveryDegraded?: boolean;
+}
 
 export interface FeatureRecord {
   schemaVersion: number;
