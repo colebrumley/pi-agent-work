@@ -92,6 +92,22 @@ import { registerStatusFooter } from "./status-footer.ts";
 import { SCHEMA_VERSION, type Handoff, type InvocationRecord, type ProgressEvent, type ProgressOperationKind, type SessionReference, type TaskMode, type TaskRecord } from "./types.ts";
 import { loadState } from "../../requirements/src/state.ts";
 import { integrationBlockers, rerunAcceptanceTests, sanitizeSummary, validateBuilderEvidence, writeVerificationReport, type BuilderEvidence, type VerificationFinding } from "./verification.ts";
+import {
+  acceptRun,
+  applyProposal,
+  approveProposal,
+  cancelRun,
+  getRun,
+  listProposals,
+  listRuns,
+  retryRunTask,
+  runReflection,
+  startRun,
+  suspendRuns,
+  type RunDeclaration,
+  type RunExecutor,
+  type RunTaskDeclaration,
+} from "./runs.ts";
 
 const execFileAsync = promisify(execFile);
 const OUTPUT_LIMIT = 40_000;
@@ -705,6 +721,90 @@ async function runMultiPerspectiveReview(
   return `${report}\n\nSaved: ${join(outDir, "latest.md")}`;
 }
 
+async function reviewTaskForRun(root: string, featureId: string, task: RunTaskDeclaration, signal: AbortSignal): Promise<{ approved: boolean; corrections?: number }> {
+  const source = await readStatus(root, featureId, task.id);
+  if (!source.worktree || !source.commit) throw new Error("Writing task is missing an isolated commit");
+  const requirements = loadState(requirementsDir(root, source.featureId));
+  const evidencePath = join(attemptDir(root, source.featureId, task.id, source.currentAttempt), "evidence.json");
+  const evidenceCheck = await validateBuilderEvidence(requirements, await readJson<unknown>(evidencePath), source.commit);
+  if (!evidenceCheck.valid || !evidenceCheck.evidence) throw new Error("Review refused invalid builder evidence");
+  await runMultiPerspectiveReview(root, {
+    featureId: source.featureId,
+    taskId: task.id,
+    worktree: source.worktree,
+    depth: "standard",
+    targetType: "code",
+    retry: true,
+  }, signal);
+  const critique = await readJson<{ findings?: Array<{ severity: "critical" | "high" | "medium" | "low"; description: string; verification?: { verdict?: string } }> }>(join(taskDir(root, source.featureId, task.id), "critique", "latest.json"));
+  const findings: VerificationFinding[] = (critique.findings ?? []).map((item) => ({
+    severity: item.severity,
+    status: item.verification?.verdict === "false-positive" ? "false-positive" : "open",
+    summary: sanitizeSummary(item.description),
+  }));
+  const verification = await rerunAcceptanceTests(requirements, evidenceCheck.evidence, source.worktree, source.commit, findings, { signal });
+  await writeVerificationReport(join(taskDir(root, source.featureId, task.id), "verification-report.json"), verification);
+  return { approved: verification.approved, corrections: findings.filter((finding) => finding.status === "open").length };
+}
+
+async function integrateTaskForRun(root: string, featureId: string, task: RunTaskDeclaration, signal: AbortSignal): Promise<void> {
+  const status = await readStatus(root, featureId, task.id);
+  if (status.state === "integrated") return;
+  if (status.state !== "review" || !status.commit) throw new Error("Task is not ready for gated integration");
+  const requirements = loadState(requirementsDir(root, featureId));
+  const verificationPath = join(taskDir(root, featureId, task.id), "verification-report.json");
+  const verification = await exists(verificationPath) ? await readJson<unknown>(verificationPath) : undefined;
+  const blockers = integrationBlockers(requirements, status.commit, verification);
+  if (blockers.length) throw new Error("Integration verification gate refused the task");
+  const taskRecord = await readTask(root, featureId, task.id);
+  for (const dependency of taskRecord.dependsOn) {
+    const dependencyStatus = await readStatus(root, featureId, dependency);
+    if (!["done", "integrated"].includes(dependencyStatus.state)) throw new Error("Integration dependency gate refused the task");
+  }
+  await withRootLock(root, async () => {
+    await assertClean(root);
+    await command("git", ["cherry-pick", status.commit!], root, signal);
+  });
+  status.state = "integrated";
+  status.message = `Integrated ${status.commit}`;
+  await writeStatus(root, status);
+  await appendJsonl(join(featureDir(root, featureId), "decisions.jsonl"), { timestamp: now(), type: "integration", taskId: task.id, commit: status.commit });
+}
+
+function executorForRoot(root: string, featureId: string): RunExecutor {
+  return {
+    async delegate(task, context) {
+      const alreadyExists = await exists(join(taskDir(root, featureId, task.id), "task.json"));
+      const started = Date.now();
+      await runTask(root, {
+        featureId,
+        taskId: task.id,
+        title: task.title,
+        prompt: task.prompt,
+        mode: task.mode,
+        profile: task.profile ?? (task.mode === "write" ? "worker" : "scout"),
+        dependsOn: task.dependsOn,
+        model: task.model,
+        thinking: task.thinking,
+        complexity: task.complexity,
+        risk: task.risk,
+        prefer: task.prefer,
+        retry: alreadyExists || context.retry,
+      }, context.signal);
+      const status = await readStatus(root, featureId, task.id);
+      let cost = 0;
+      try {
+        const invocation = await readJson<InvocationRecord>(join(attemptDir(root, featureId, task.id, status.currentAttempt), "invocation.json"));
+        cost = invocation.usage?.cost ?? 0;
+      } catch { /* bounded telemetry is optional */ }
+      const outcome = status.state === "review" ? "review" : status.state === "done" || status.state === "integrated" ? "completed" : status.state === "blocked" ? "blocked" : status.state === "cancelled" ? "cancelled" : "failed";
+      return { outcome, durationMs: Date.now() - started, cost };
+    },
+    review: (task, context) => reviewTaskForRun(root, featureId, task, context.signal),
+    integrate: (task, context) => integrateTaskForRun(root, featureId, task, context.signal),
+  };
+}
+
 /** Set by extension factory so runTask can gate routing on successful activation. */
 let activeSessionProfileRuntime: SessionProfileRuntime | undefined;
 
@@ -744,9 +844,15 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       ctx: ctx as any,
       runtime: sessionRuntime,
     });
+    // Resume durable nonterminal runs after routing is available. Terminal tasks are never relaunched.
+    for (const run of await listRuns(root)) if (run.state !== "terminal") {
+      void startRun(root, run.featureId, run.runId, executorForRoot(root, run.featureId));
+    }
   });
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", async (_event, ctx) => {
+    const root = await projectRoot(ctx.cwd);
+    await suspendRuns(root);
     sessionRuntime.activated = false;
     sessionRuntime.routingConfig = undefined;
     if (activeSessionProfileRuntime === sessionRuntime) activeSessionProfileRuntime = undefined;
@@ -1004,6 +1110,93 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
         operationId: _id,
       }, signal, (progress, event) => onUpdate?.({ content: [{ type: "text", text: progress }], details: { progress: event } }));
       return { content: [{ type: "text", text: result.receipt }], details: { attemptPath: result.attemptPath, sessionFile: result.sessionFile, operationId: result.operationId } };
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_run",
+    label: "Orchestrate Run",
+    description: "Submit, inspect, cancel, resume, explicitly retry, or reflect a durable dependency-aware parallel run.",
+    promptSnippet: "Run two or more genuinely independent eligible tasks with durable dependency-aware scheduling",
+    promptGuidelines: ["Use agent_run submit only when decomposition contains at least two genuinely independent eligible tasks; retain agent_delegate for a single task."],
+    parameters: Type.Object({
+      action: StringEnum(["submit", "status", "list", "cancel", "retry", "resume", "reflect"] as const),
+      featureId: Type.String(),
+      runId: Type.Optional(Type.String()),
+      taskId: Type.Optional(Type.String()),
+      concurrency: Type.Optional(Type.Integer({ minimum: 1 })),
+      tasks: Type.Optional(Type.Array(Type.Object({
+        id: Type.String(),
+        title: Type.String(),
+        prompt: Type.String(),
+        mode: StringEnum(["read", "write"] as const),
+        profile: Type.Optional(Type.String()),
+        dependsOn: Type.Array(Type.String()),
+        model: Type.Optional(Type.String()),
+        thinking: Type.Optional(Type.String()),
+        complexity: Type.Optional(StringEnum(["tiny", "small", "medium", "large"] as const)),
+        risk: Type.Optional(StringEnum(["low", "medium", "high"] as const)),
+        prefer: Type.Optional(StringEnum(["cost", "speed", "quality", "balanced"] as const)),
+      }))),
+    }),
+    async execute(_id, params, _signal, _update, ctx) {
+      const root = await projectRoot(ctx.cwd);
+      await assertFeature(root, params.featureId);
+      if (params.action === "list") {
+        const runs = await listRuns(root, params.featureId);
+        return { content: [{ type: "text", text: runs.length ? JSON.stringify(runs, null, 2) : "No runs." }], details: { runs } };
+      }
+      if (!params.runId) throw new Error(`${params.action} requires runId`);
+      const executor = executorForRoot(root, params.featureId);
+      if (params.action === "submit") {
+        if (!params.tasks?.length) throw new Error("submit requires a complete non-empty tasks graph");
+        await ensureLocalIgnore(root);
+        const declaration: RunDeclaration = { schemaVersion: 1, id: params.runId, featureId: params.featureId, tasks: params.tasks as RunTaskDeclaration[], concurrency: params.concurrency };
+        const state = await acceptRun(root, declaration);
+        await startRun(root, params.featureId, params.runId, executor);
+        return { content: [{ type: "text", text: `Accepted run ${params.runId}; scheduling continues non-blockingly.\nState: ${join(featureDir(root, params.featureId), "runs", params.runId, "state.json")}` }], details: state };
+      }
+      if (params.action === "status") {
+        const state = await getRun(root, params.featureId, params.runId);
+        const taskLines = Object.values(state.tasks).map((task) => `${task.id}: ${task.state}${task.waitReason ? ` (${task.waitReason})` : ""}`);
+        const summary = [`Run ${params.runId}: ${state.state}${state.outcome ? `/${state.outcome}` : ""}`, `Agents: ${state.activeCount}/${state.effectiveCap}`, ...taskLines, `Reflection: ${state.reflection.status}${state.reflection.path ? ` — ${state.reflection.path}` : ""}`].join("\n");
+        return { content: [{ type: "text", text: truncate(summary) }], details: state };
+      }
+      if (params.action === "reflect") {
+        const state = await runReflection(root, params.featureId, params.runId, true);
+        return { content: [{ type: "text", text: `Reflection ${state.reflection.status}${state.reflection.path ? `: ${state.reflection.path}` : state.reflection.reason ? `: ${state.reflection.reason}` : ""}` }], details: state };
+      }
+      await startRun(root, params.featureId, params.runId, executor);
+      if (params.action === "cancel") await cancelRun(root, params.featureId, params.runId, params.taskId);
+      else if (params.action === "retry") {
+        if (!params.taskId) throw new Error("retry requires taskId");
+        await retryRunTask(root, params.featureId, params.runId, params.taskId);
+      }
+      const state = await getRun(root, params.featureId, params.runId);
+      return { content: [{ type: "text", text: `${params.action === "resume" ? "Resumed" : params.action === "retry" ? "Explicit retry requested for" : "Cancellation requested for"} ${params.taskId ?? params.runId}.` }], details: state };
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_reflection_proposal",
+    label: "Reflection Proposals",
+    description: "List, explicitly approve, or audit-apply recurring evidence-backed process proposals. Never mutates behavior or configuration automatically.",
+    parameters: Type.Object({
+      action: StringEnum(["list", "approve", "apply"] as const),
+      proposalId: Type.Optional(Type.String()),
+      operator: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params, _signal, _update, ctx) {
+      const root = await projectRoot(ctx.cwd);
+      if (params.action === "list") {
+        const proposals = await listProposals(root);
+        return { content: [{ type: "text", text: proposals.length ? JSON.stringify(proposals, null, 2) : "No recurring proposals." }], details: { proposals } };
+      }
+      if (!params.proposalId || !params.operator) throw new Error(`${params.action} requires proposalId and explicit operator identity`);
+      const proposal = params.action === "approve"
+        ? await approveProposal(root, params.proposalId, params.operator)
+        : await applyProposal(root, params.proposalId, params.operator);
+      return { content: [{ type: "text", text: `Proposal ${proposal.id}: ${proposal.state}. No behavior or configuration was changed automatically.` }], details: proposal };
     },
   });
 

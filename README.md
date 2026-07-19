@@ -35,6 +35,8 @@ pi install /absolute/path/to/pi-agent-work
 - `agent_requirements` — init/validate/gaps/apply/render requirements state
 - `agent_questionnaire` — interactive 1–5 question requirements batch in TUI (tabs + review/submit); returns structured answers. In print/JSON/RPC modes returns `ui_unavailable` so the coordinator falls back to chat. Not available to isolated subagents (`--no-extensions`).
 - `agent_delegate` — isolated read-only or writing child with automatic cost/latency/quality routing (writes are gated)
+- `agent_run` — durable dependency-graph scheduling with bounded parallel delegation/review, serial gated integration, cancellation/resume/retry, and terminal reflection
+- `agent_reflection_proposal` — list and explicitly approve/audit-apply recurring reflection proposals (never auto-mutates behavior)
 - `agent_router` — inspect active profile/routing policy and outcomes, or record accepted/corrected/failed feedback
 - `/agent-profile` — interactively select or activate a named coordinator+routing profile (`--agent-profile` at startup)
 - `agent_operation` — inspect/replay durable progress, list active operations, or cancel one without automatic retry
@@ -57,6 +59,7 @@ Optional explicit skill command: `/skill:requirements-interviewer`
 ├── router.json                 # editable agent profiles + delegated routing (schema v2)
 ├── routing-decisions.jsonl     # routes, actual usage/cost/latency, corrections
 ├── progress/<operation-id>.jsonl # correlated durable progress for TUI/API/resume
+├── proposals/<proposal-id>.json  # recurring findings; operator approval required
 └── features/<feature-id>/
     ├── brief.md
     ├── feature.json
@@ -66,6 +69,7 @@ Optional explicit skill command: `/skill:requirements-interviewer`
     │   ├── decision-log.json
     │   ├── spec.md
     │   └── handoff.md
+    ├── runs/<run-id>/           # graph.json, state.json, events.jsonl, reflection.json
     └── tasks/<task-id>/
         ├── task.json
         ├── status.json
@@ -91,6 +95,12 @@ pending → running → review → integrated
 ```
 
 Write delegation requires a schema-v2 handoff-ready requirements package. `forceRequirements` is retained for API compatibility but never constitutes risk acceptance or bypasses validation. Existing schema-v1 packages remain loadable, migrate without losing prior content, and intentionally remain not-ready until re-interviewed.
+
+## Parallel runs and reflection
+
+Submit a complete graph with `agent_run`. The graph is validated atomically (duplicates, missing/self dependencies, and cycles) before launch. Ready builders, scouts, and pipelined reviewers share a repository-configurable cap (`.agent-work/config.json` → `runConcurrency`, default 3); a run may override it. Writing tasks still require exact-commit review and verification, and integration remains deterministic and serial. Runs can be inspected, cancelled, resumed after restart, and explicitly retried; failures never retry automatically.
+
+Every settled run records one non-blocking reflection or an evidence-insufficient skip. Reflection reads only allowlisted structured lifecycle state and numeric telemetry—not sessions, prompts, raw prose, environment values, credentials, or source files. Recurring findings become proposals, but approval/application is an auditable acknowledgement and never changes code, prompts, routing, or configuration automatically.
 
 ## Progress and cancellation
 

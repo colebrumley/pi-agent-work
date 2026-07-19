@@ -14,7 +14,11 @@
     { "$ref": "#/$defs/handoff" },
     { "$ref": "#/$defs/progress" },
     { "$ref": "#/$defs/builderEvidence" },
-    { "$ref": "#/$defs/verificationReport" }
+    { "$ref": "#/$defs/verificationReport" },
+    { "$ref": "#/$defs/runGraph" },
+    { "$ref": "#/$defs/runState" },
+    { "$ref": "#/$defs/reflectionReport" },
+    { "$ref": "#/$defs/reflectionProposal" }
   ],
   "$defs": {
     "base": {
@@ -191,6 +195,54 @@
       "properties": {
         "schemaVersion": { "const": 2 }, "requirementsRevision": { "type": "string" }, "reviewedCommit": { "type": "string" }, "generatedAt": { "type": "string", "format": "date-time" },
         "evidenceComplete": { "type": "boolean" }, "approved": { "type": "boolean" }, "tests": { "type": "array" }, "findings": { "type": "array" }
+      }
+    },
+    "runGraph": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "id", "featureId", "tasks"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "id": { "type": "string" }, "featureId": { "type": "string" },
+        "concurrency": { "type": "integer", "minimum": 1 },
+        "tasks": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "type": "object", "required": ["id", "title", "prompt", "mode", "dependsOn"], "properties": {
+          "id": { "type": "string", "maxLength": 80 }, "title": { "type": "string", "maxLength": 500 }, "prompt": { "type": "string", "maxLength": 40000 },
+          "mode": { "enum": ["read", "write"] }, "profile": { "type": "string" }, "dependsOn": { "type": "array", "items": { "type": "string" } }
+        } } }
+      }
+    },
+    "runState": {
+      "type": "object",
+      "required": ["schemaVersion", "runId", "featureId", "state", "effectiveCap", "activeCount", "tasks", "integrationOrder", "integrated", "reflection", "createdAt", "updatedAt"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "runId": { "type": "string" }, "featureId": { "type": "string" },
+        "state": { "enum": ["accepted", "running", "terminal"] }, "outcome": { "enum": ["success", "failed", "blocked", "cancelled"] },
+        "effectiveCap": { "type": "integer", "minimum": 1 }, "activeCount": { "type": "integer", "minimum": 0 }, "maxActiveCount": { "type": "integer", "minimum": 0 },
+        "tasks": { "type": "object", "additionalProperties": { "type": "object", "required": ["id", "state", "stageAttempt", "retryCount", "durationMs", "cost", "corrections"], "properties": {
+          "id": { "type": "string" }, "state": { "enum": ["queued", "running", "review", "integration", "blocked", "failed", "cancelled", "completed"] },
+          "stageAttempt": { "type": "integer", "minimum": 0 }, "retryCount": { "type": "integer", "minimum": 0 }, "durationMs": { "type": "number", "minimum": 0 }, "cost": { "type": "number", "minimum": 0 }, "corrections": { "type": "integer", "minimum": 0 }
+        } } },
+        "integrationOrder": { "type": "array", "items": { "type": "string" } }, "integrated": { "type": "array", "items": { "type": "string" } },
+        "reflection": { "type": "object", "required": ["status", "attempt"], "properties": { "status": { "enum": ["not-started", "pending", "complete", "skipped", "failed"] }, "attempt": { "type": "integer", "minimum": 0 }, "path": { "type": "string" } } },
+        "createdAt": { "type": "string", "format": "date-time" }, "updatedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "reflectionReport": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "runId", "featureId", "outcome", "generatedAt", "evidenceBoundary", "conclusions"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "runId": { "type": "string" }, "featureId": { "type": "string" }, "outcome": { "enum": ["success", "failed", "blocked", "cancelled"] },
+        "generatedAt": { "type": "string", "format": "date-time" }, "evidenceBoundary": { "const": "sanitized-structured-lifecycle-v1" },
+        "conclusions": { "type": "array", "minItems": 6, "maxItems": 6, "items": { "type": "object", "required": ["category", "kind", "summary", "evidence", "confidence", "recommendation"], "properties": {
+          "category": { "enum": ["elapsed-cost-hotspots", "idle-blocked-time", "retries-corrections", "duplicated-work", "avoidable-serialization", "quality-escapes"] }, "kind": { "enum": ["finding", "no-op"] },
+          "summary": { "type": "string" }, "evidence": { "type": "array", "maxItems": 10 }, "confidence": { "enum": ["low", "medium", "high"] }, "recommendation": { "type": "string" }
+        } } }
+      }
+    },
+    "reflectionProposal": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "id", "opportunityKey", "state", "sourceRuns", "createdAt", "updatedAt", "audit"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "id": { "type": "string" }, "opportunityKey": { "type": "string" }, "state": { "enum": ["pending", "approved", "applied"] },
+        "sourceRuns": { "type": "array", "minItems": 2, "items": { "type": "string" }, "uniqueItems": true }, "createdAt": { "type": "string", "format": "date-time" }, "updatedAt": { "type": "string", "format": "date-time" }, "audit": { "type": "array" }
       }
     },
     "handoff": {
