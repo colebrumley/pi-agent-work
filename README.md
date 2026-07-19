@@ -35,7 +35,8 @@ pi install /absolute/path/to/pi-agent-work
 - `agent_requirements` — init/validate/gaps/apply/render requirements state
 - `agent_questionnaire` — interactive 1–5 question requirements batch in TUI (tabs + review/submit); returns structured answers. In print/JSON/RPC modes returns `ui_unavailable` so the coordinator falls back to chat. Not available to isolated subagents (`--no-extensions`).
 - `agent_delegate` — isolated read-only or writing child with automatic cost/latency/quality routing (writes are gated)
-- `agent_router` — inspect routing policy and outcomes, or record accepted/corrected/failed feedback
+- `agent_router` — inspect active profile/routing policy and outcomes, or record accepted/corrected/failed feedback
+- `/agent-profile` — interactively select or activate a named coordinator+routing profile (`--agent-profile` at startup)
 - `agent_operation` — inspect/replay durable progress, list active operations, or cancel one without automatic retry
 - `agent_inspect` — retrieve handoffs, events, invocation data, or full sessions
 - `agent_ask` — resume the exact child session for follow-up or revision
@@ -53,7 +54,7 @@ Optional explicit skill command: `/skill:requirements-interviewer`
 ```text
 .agent-work/
 ├── manifest.json
-├── router.json                 # editable model utility policy
+├── router.json                 # editable agent profiles + delegated routing (schema v2)
 ├── routing-decisions.jsonl     # routes, actual usage/cost/latency, corrections
 ├── progress/<operation-id>.jsonl # correlated durable progress for TUI/API/resume
 └── features/<feature-id>/
@@ -116,13 +117,47 @@ A writing task records bounded, sanitized evidence including commands, environme
 - Always-on Critical Feedback Protocol for coordinator and children
 - Interactive questionnaire is coordinator-only; subagents block on ambiguity instead of guessing
 
-## Model routing
+## Model routing and agent profiles
 
-The interactive coordinator remains on the model you selected (for example, subscription-backed `openai-codex/gpt-5.6-sol`). Delegated tasks are routed independently. The default policy favors `openrouter/z-ai/glm-5.2`, promotes medium/high-risk work to faster or stronger models, applies a scarcity penalty to subscription models, and raises the quality floor after each retry.
+Named **agent profiles** swap the interactive coordinator model and delegated-agent routing together. Profiles live in repository-local `.agent-work/router.json` (schema version 2) and can be edited without changing plugin source.
 
-Pass `model` to `agent_delegate` for an explicit override. Otherwise, optional `complexity`, `risk`, and `prefer` hints refine the explainable heuristic. Edit `.agent-work/router.json` to calibrate model quality, speed, relative cost, objective weights, and subscription scarcity. Run `agent_router(action="report")` to compare route count, corrections, failures, cost, and elapsed time by model; writing follow-ups are automatically counted as corrections.
+### Seeded profiles
 
-`route.json` beside each invocation captures the classification, minimum quality, every candidate score, and selection rationale. Actual token usage, API cost, and duration are saved in `invocation.json` and the append-only global telemetry log.
+| Profile | Coordinator | Delegated routing |
+| --- | --- | --- |
+| **Pro** (default) | `openai-codex/gpt-5.6-sol` | GLM for trivial scouts; Terra for ordinary builders, non-trivial scouts, and reviewers; automatic Terra→Sol escalation only when the quality floor requires it |
+| **Economy** | `openai-codex/gpt-5.6-sol` | Strict pins: GLM for builders and scouts, Sol for reviewers (complexity/risk/retry ignored unless overridden) |
+
+Fresh repositories default to **Pro**. An untouched schema-version-1 default migrates to Pro; a customized v1 router is preserved field-for-field as an editable **Legacy** profile (active) while Pro and Economy are added. Migration is idempotent.
+
+### Activation
+
+- Interactive selector: `/agent-profile`
+- Named command: `/agent-profile Economy`
+- Startup flag: `pi --agent-profile Pro` (takes precedence for that startup and persists on success)
+
+The last **successfully** activated profile is remembered per repository. Activation is atomic: every referenced coordinator and delegated model must be known and have configured authentication before anything changes. Failures restore prior coordinator, routing, status, and persisted selection and show an actionable error. The active profile is visible via the `agent-profile` status line and `agent_router(action="status")`.
+
+Pass `model` to `agent_delegate` for an explicit per-delegation override; it still wins over the active profile without changing it. Optional `complexity`, `risk`, and `prefer` hints refine utility-mode profiles. Run `agent_router(action="report")` to compare route count, corrections, failures, cost, and elapsed time by model.
+
+`route.json` beside each invocation captures the active profile, classification, minimum quality, candidate scores, and selection rationale. Actual token usage, API cost, and duration are saved in `invocation.json` and the append-only global telemetry log.
+
+Example custom profile entry (pinned mode):
+
+```json
+{
+  "name": "Lab",
+  "coordinatorModel": "openai-codex/gpt-5.6-sol",
+  "routing": {
+    "mode": "pinned",
+    "pins": {
+      "builder": "openrouter/z-ai/glm-5.2",
+      "scout": "openrouter/z-ai/glm-5.2",
+      "reviewer": "openai-codex/gpt-5.6-sol"
+    }
+  }
+}
+```
 
 ## Git behavior
 

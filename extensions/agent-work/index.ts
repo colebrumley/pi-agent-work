@@ -46,7 +46,26 @@ import {
   ProgressMonitor,
   readProgressTimeline,
 } from "./progress.ts";
-import { loadRouterConfig, routeTask, routerConfigPath, type RouteComplexity, type RouteRisk } from "./router.ts";
+import {
+  activateAgentProfile,
+  activateStartupProfile,
+  createSessionProfileRuntime,
+  ensureRuntimeAfterCommandFailure,
+  ensureRuntimeAfterCommandSuccess,
+  routingConfigForSession,
+  type SessionProfileRuntime,
+} from "./profiles.ts";
+import {
+  ECONOMY_PROFILE_NAME,
+  PRO_PROFILE_NAME,
+  formatActiveProfileStatus,
+  loadRouterConfig,
+  routeTask,
+  routerConfigPath,
+  type RouteComplexity,
+  type RouteRisk,
+  type RouterConfig,
+} from "./router.ts";
 import {
   appendJsonl,
   assertFeature,
@@ -257,7 +276,12 @@ async function runTask(
   const task = await readTask(root, featureId, taskId);
   const attempt = await nextAttempt(root, featureId, taskId);
   const attemptPath = attemptDir(root, featureId, taskId, attempt);
-  const route = routeTask(await loadRouterConfig(root), {
+  const diskRouter = await loadRouterConfig(root);
+  // Session activation gate: profile routing applies only after successful startup/command activation.
+  const effectiveRouter = activeSessionProfileRuntime
+    ? routingConfigForSession(activeSessionProfileRuntime, diskRouter)
+    : diskRouter;
+  const route = routeTask(effectiveRouter, {
     taskId, title: input.title, prompt: input.prompt, mode: input.mode, profile: input.profile, attempt,
     complexity: input.complexity, risk: input.risk, prefer: input.prefer,
   }, input.model, input.thinking);
@@ -681,8 +705,105 @@ async function runMultiPerspectiveReview(
   return `${report}\n\nSaved: ${join(outDir, "latest.md")}`;
 }
 
+/** Set by extension factory so runTask can gate routing on successful activation. */
+let activeSessionProfileRuntime: SessionProfileRuntime | undefined;
+
 export default function agentWorkExtension(pi: ExtensionAPI) {
   registerStatusFooter(pi);
+
+  pi.registerFlag("agent-profile", {
+    description: "Activate a named agent-work model profile (coordinator + delegated routing)",
+    type: "string",
+  });
+
+  const sessionRuntime = createSessionProfileRuntime();
+  activeSessionProfileRuntime = sessionRuntime;
+  let startupHandled = false;
+  const modelApi = { setModel: (model: unknown) => pi.setModel(model as any) };
+
+  pi.on("session_start", async (_event, ctx) => {
+    const root = await projectRoot(ctx.cwd);
+    await initializeRoot(root);
+    // Reset per-session activation gate.
+    sessionRuntime.activated = false;
+    sessionRuntime.routingConfig = undefined;
+    sessionRuntime.lastError = undefined;
+    sessionRuntime.statusLine = "agent-profile: pending";
+    activeSessionProfileRuntime = sessionRuntime;
+
+    if (startupHandled) return;
+    startupHandled = true;
+
+    const flagRaw = pi.getFlag("agent-profile");
+    const flagName = typeof flagRaw === "string" && flagRaw.trim() ? flagRaw.trim() : null;
+
+    await activateStartupProfile({
+      api: modelApi,
+      root,
+      flagName,
+      ctx: ctx as any,
+      runtime: sessionRuntime,
+    });
+  });
+
+  pi.on("session_shutdown", () => {
+    sessionRuntime.activated = false;
+    sessionRuntime.routingConfig = undefined;
+    if (activeSessionProfileRuntime === sessionRuntime) activeSessionProfileRuntime = undefined;
+  });
+
+  pi.registerCommand("agent-profile", {
+    description: "Select or activate a named agent-work model profile",
+    getArgumentCompletions: (prefix: string) => {
+      const names = [PRO_PROFILE_NAME, ECONOMY_PROFILE_NAME, "Legacy"].filter((name) =>
+        name.toLowerCase().startsWith(prefix.toLowerCase()));
+      return names.length ? names.map((value) => ({ value, label: value })) : null;
+    },
+    handler: async (args, ctx) => {
+      const root = await projectRoot(ctx.cwd);
+      let config: RouterConfig;
+      try {
+        config = await loadRouterConfig(root);
+      } catch (error: any) {
+        ctx.ui.notify(`agent-profile: ${error?.message ?? error}`, "error");
+        return;
+      }
+
+      const requested = args.trim();
+      const run = async (name: string) => {
+        const result = await activateAgentProfile({
+          api: modelApi,
+          root,
+          profileName: name,
+          ctx: ctx as any,
+          baselineConfig: sessionRuntime.routingConfig ?? config,
+        });
+        if (result.ok) ensureRuntimeAfterCommandSuccess(sessionRuntime, result);
+        else ensureRuntimeAfterCommandFailure(sessionRuntime, result);
+      };
+
+      if (requested) {
+        await run(requested);
+        return;
+      }
+
+      const names = config.profiles.map((profile) => profile.name);
+      if (!names.length) {
+        ctx.ui.notify("agent-profile: no profiles configured in router.json", "error");
+        return;
+      }
+      const selected = await ctx.ui.select(
+        `Active profile: ${config.activeProfile}. Choose a profile:`,
+        names,
+      );
+      if (!selected) {
+        ctx.ui.notify(`Keeping ${formatActiveProfileStatus(sessionRuntime.routingConfig ?? config)}`, "info");
+        return;
+      }
+      await run(selected);
+    },
+  });
+
   pi.on("before_agent_start", async (event) => ({
     systemPrompt: `${event.systemPrompt}\n\n${CRITICAL_FEEDBACK_PROTOCOL}\n\n${FEATURE_WORKFLOW_PROTOCOL}\n\n${ROUTER_ORCHESTRATION_PROTOCOL}`,
   }));
@@ -903,7 +1024,8 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       const config = await loadRouterConfig(root);
       const logPath = join(rootDir(root), "routing-decisions.jsonl");
       if (params.action === "status") {
-        return { content: [{ type: "text", text: `Config: ${routerConfigPath(root)}\nTelemetry: ${logPath}\n\n${JSON.stringify(config, null, 2)}` }], details: config };
+        const active = formatActiveProfileStatus(config);
+        return { content: [{ type: "text", text: `${active}\nConfig: ${routerConfigPath(root)}\nTelemetry: ${logPath}\n\n${JSON.stringify(config, null, 2)}` }], details: { ...config, statusLine: active } };
       }
       if (params.action === "feedback") {
         if (!params.featureId || !params.taskId || !params.outcome) throw new Error("feedback requires featureId, taskId, and outcome");
