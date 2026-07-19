@@ -125,7 +125,7 @@ Named **agent profiles** swap the interactive coordinator model and delegated-ag
 
 | Profile | Coordinator | Delegated routing |
 | --- | --- | --- |
-| **Pro** (default) | `openai-codex/gpt-5.6-sol` | GLM for trivial scouts; Terra for ordinary builders, non-trivial scouts, and reviewers; automatic Terra→Sol escalation only when the quality floor requires it |
+| **Pro** (default) | `openai-codex/gpt-5.6-sol` | Luna for trivial scouts; Terra for ordinary builders, non-trivial scouts, and reviewers; automatic Terra→Sol escalation only when the quality floor requires it |
 | **Economy** | `openai-codex/gpt-5.6-sol` | Strict pins: GLM for builders and scouts, Sol for reviewers (complexity/risk/retry ignored unless overridden) |
 
 Fresh repositories default to **Pro**. An untouched schema-version-1 default migrates to Pro; a customized v1 router is preserved field-for-field as an editable **Legacy** profile (active) while Pro and Economy are added. Migration is idempotent.

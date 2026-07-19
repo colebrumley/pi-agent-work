@@ -10,6 +10,7 @@ export type ProfileRoutingMode = "utility" | "pinned";
 
 export const SOL_MODEL = "openai-codex/gpt-5.6-sol";
 export const TERRA_MODEL = "openai-codex/gpt-5.6-terra";
+export const LUNA_MODEL = "openai-codex/gpt-5.6-luna";
 export const GLM_MODEL = "openrouter/z-ai/glm-5.2";
 export const GROK_MODEL = "openrouter/x-ai/grok-4.5";
 
@@ -113,7 +114,7 @@ export function createProProfile(): AgentProfile {
       weights: { cost: 0.45, speed: 0.2, quality: 0.35 },
       subscriptionScarcityPenalty: 0.15,
       models: [
-        { model: GLM_MODEL, label: "trivial scout", roles: ["scout"], quality: 0.72, speed: 0.78, relativeCost: 0.12 },
+        { model: LUNA_MODEL, label: "trivial scout", roles: ["scout"], quality: 0.72, speed: 0.78, relativeCost: 0.12 },
         {
           model: TERRA_MODEL,
           label: "subscription senior",

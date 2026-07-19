@@ -8,6 +8,7 @@ import {
   GLM_MODEL,
   GROK_MODEL,
   LEGACY_PROFILE_NAME,
+  LUNA_MODEL,
   PRO_PROFILE_NAME,
   SOL_MODEL,
   TERRA_MODEL,
@@ -41,6 +42,7 @@ function fakeRegistry(auth: Record<string, boolean> = {}): ModelAuthInspector {
   const defaults: Record<string, boolean> = {
     [SOL_MODEL]: true,
     [TERRA_MODEL]: true,
+    [LUNA_MODEL]: true,
     [GLM_MODEL]: true,
     [GROK_MODEL]: true,
     "test/custom-builder": true,
@@ -89,7 +91,7 @@ function baseReq(over: Partial<Parameters<typeof routeTask>[1]> = {}) {
     complexity: "tiny",
     risk: "low",
   }));
-  assert.equal(trivialScout.selectedModel, GLM_MODEL, "trivial scout -> GLM");
+  assert.equal(trivialScout.selectedModel, LUNA_MODEL, "trivial scout -> Luna");
   assert.equal(trivialScout.activeProfile, PRO_PROFILE_NAME);
 
   const builder = routeTask(config, baseReq({
