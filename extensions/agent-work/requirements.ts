@@ -104,7 +104,7 @@ export async function assertWriteGate(
 ): Promise<{ handoffPath: string; forced: boolean }> {
   const status = await requirementsStatus(root, featureId);
   if (!status.exists) {
-    throw new Error(`Requirements package missing for ${featureId}. Run /requirements or agent_requirements first.`);
+    throw new Error(`Requirements package missing for ${featureId}. Start the automatic requirements workflow or use agent_requirements first.`);
   }
   if (!status.handoffReady) {
     throw new Error(`Requirements not handoff-ready for ${featureId}. A force flag is not risk acceptance; only an explicit eligible readinessOptOut in state can bypass attestation.\n${status.reportText ?? ""}`.trim());

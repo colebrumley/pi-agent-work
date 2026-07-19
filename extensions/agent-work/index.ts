@@ -781,7 +781,7 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       return {
         content: [{
           type: "text",
-          text: `Created feature ${feature.id}\nBrief: ${join(featureDir(root, feature.id), "brief.md")}\nRequirements: ${reqDir}\nNext: run /requirements or agent_requirements until handoff-ready.`,
+          text: `Created feature ${feature.id}\nBrief: ${join(featureDir(root, feature.id), "brief.md")}\nRequirements: ${reqDir}\nNext: continue the automatic requirements interview with agent_requirements until handoff-ready.`,
         }],
         details: feature,
       };

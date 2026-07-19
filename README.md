@@ -44,7 +44,7 @@ pi install /absolute/path/to/pi-agent-work
 
 The interactive footer keeps Pi's token/cache, context, model/thinking, session, and extension-status information, and adds repository/branch/SHA, dirty and upstream divergence state. Cost is labeled `OR` and includes only OpenRouter-reported spend: direct calls in the current session plus repository-lifetime delegated-agent telemetry (shown separately as `agents`). Subscription-backed usage is excluded.
 
-Optional explicit prompts: `/one-shot`, `/requirements`, `/critique`
+Optional explicit prompts: `/one-shot`, `/critique`
 
 Optional explicit skill command: `/skill:requirements-interviewer`
 

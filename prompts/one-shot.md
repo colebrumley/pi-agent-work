@@ -8,7 +8,7 @@ $@
 
 Workflow:
 1. Create a feature with `agent_feature_init` (bootstraps requirements package).
-2. Run a skeptical requirements interview (`/requirements` or `agent_requirements`) until the specification can unambiguously be built end to end without clarification or invented requirements.
+2. Run a skeptical requirements interview with `agent_requirements` until the specification can unambiguously be built end to end without clarification or invented requirements.
    - Structured state is source of truth. Resolve every readiness domain, define structured acceptance tests, and render the handoff before building.
    - Continue clarifying after cursory answers; present one visible recommendation with rationale for every ambiguity.
 3. Decompose only when useful; delegate feature-sized tasks rather than tiny coding steps.
