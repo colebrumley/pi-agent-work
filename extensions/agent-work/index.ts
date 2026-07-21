@@ -342,6 +342,8 @@ async function runTask(
   onProgress?: ProgressCallback,
 ): Promise<{ receipt: string; finalText: string; attemptPath: string; sessionFile?: string; operationId: string }> {
   const feature = await assertFeature(root, input.featureId);
+  // Capture before asynchronous work so an outcome remains attributed to its initiating Pi session.
+  const coordinatorSessionId = activeSessionId;
   const featureId = feature.id;
   const taskId = safeId(input.taskId, "task id");
   const taskPath = taskDir(root, featureId, taskId);
@@ -547,6 +549,7 @@ async function runTask(
       await appendJsonl(join(rootDir(root), "routing-decisions.jsonl"), {
         timestamp: now(), type: "outcome", featureId, taskId, attempt, model: selectedModel,
         state: status.state, durationMs: invocationRecord.durationMs, usage: run.usage, correction: attempt > 1,
+        sessionId: coordinatorSessionId,
       });
         await monitor.terminal("failure", "Child process failed; inspect persisted diagnostics");
         await writeIntegrityManifest(root, { featureId, taskId, attempt });
@@ -596,6 +599,7 @@ async function runTask(
         await appendJsonl(join(rootDir(root), "routing-decisions.jsonl"), {
           timestamp: now(), type: "outcome", featureId, taskId, attempt, model: selectedModel,
           state: status.state, durationMs: invocationRecord.durationMs, usage: run.usage, correction: attempt > 1,
+          sessionId: coordinatorSessionId,
         });
         await monitor.terminal("failure", status.message);
         await writeIntegrityManifest(root, { featureId, taskId, attempt });
@@ -668,7 +672,7 @@ async function runTask(
     await appendJsonl(join(rootDir(root), "routing-decisions.jsonl"), {
       timestamp: now(), type: "outcome", featureId, taskId, attempt, model: selectedModel,
       state: status.state, durationMs: invocationRecord.durationMs, usage: run.usage,
-      correction: attempt > 1,
+      correction: attempt > 1, sessionId: coordinatorSessionId,
     });
     await settleRouteOutcome(root, route, featureId, taskId, attempt, status.state);
     await writeIntegrityManifest(root, { featureId, taskId, attempt });
@@ -687,7 +691,7 @@ async function runTask(
     await writeStatus(root, status);
     await appendJsonl(join(rootDir(root), "routing-decisions.jsonl"), {
       timestamp: now(), type: "outcome", featureId, taskId, attempt, model: selectedModel,
-      state: status.state, correction: attempt > 1, error: status.message,
+      state: status.state, correction: attempt > 1, error: status.message, sessionId: coordinatorSessionId,
     });
     await settleRouteOutcome(root, route, featureId, taskId, attempt, status.state);
     await writeIntegrityManifest(root, { featureId, taskId, attempt });
@@ -903,6 +907,8 @@ function executorForRoot(root: string, featureId: string): RunExecutor {
 
 /** Set by extension factory so runTask can gate routing on successful activation. */
 let activeSessionProfileRuntime: SessionProfileRuntime | undefined;
+/** Opaque Pi session identity for attributing delegated outcomes to the initiating session. */
+let activeSessionId: string | undefined;
 
 export default function agentWorkExtension(pi: ExtensionAPI) {
   registerStatusFooter(pi);
@@ -918,6 +924,7 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
   const modelApi = { setModel: (model: unknown) => pi.setModel(model as any) };
 
   pi.on("session_start", async (_event, ctx) => {
+    activeSessionId = ctx.sessionManager.getSessionId();
     const root = await projectRoot(ctx.cwd);
     await initializeRoot(root);
     // Reset per-session activation gate.
@@ -952,6 +959,7 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
     sessionRuntime.activated = false;
     sessionRuntime.routingConfig = undefined;
     if (activeSessionProfileRuntime === sessionRuntime) activeSessionProfileRuntime = undefined;
+    activeSessionId = undefined;
   });
 
   pi.registerCommand("agent-profile", {

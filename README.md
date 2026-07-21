@@ -46,7 +46,7 @@ pi install /absolute/path/to/pi-agent-work
 - `agent_integrate` — cherry-pick a reviewed task commit
 - `agent_maintenance` — dry-run-first failed-diagnostic pruning, successful compaction, owned cleanup, and foreign Git diagnostics
 
-The interactive footer keeps Pi's token/cache, context, model/thinking, session, and extension-status information, and adds repository/branch/SHA, dirty and upstream divergence state. Cost is labeled `OR` and includes only OpenRouter-reported spend: direct calls in the current session plus repository-lifetime delegated-agent telemetry (shown separately as `agents`). Subscription-backed usage is excluded.
+The interactive footer keeps Pi's token/cache, context, model/thinking, session, and extension-status information, and adds repository/branch/SHA, dirty and upstream divergence state. Cost is labeled `OR` and includes only OpenRouter-reported spend: direct calls in the current session plus delegated-agent outcomes attributed to that same Pi session (shown separately as `agents`). Repository telemetry remains retained for router reports; legacy or other-session outcomes are excluded from the footer. Subscription-backed usage is excluded.
 
 Optional explicit prompts: `/one-shot`, `/critique`
 

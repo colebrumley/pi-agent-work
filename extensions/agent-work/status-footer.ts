@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
 import { basename, join, relative } from "node:path";
 import { promisify } from "node:util";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { readAgentOpenRouterCost } from "./footer-cost.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -71,27 +71,6 @@ async function readGitSnapshot(cwd: string): Promise<GitSnapshot> {
   }
 }
 
-async function readAgentOpenRouterCost(root?: string): Promise<number> {
-  if (!root) return 0;
-  try {
-    const text = await readFile(join(root, ".agent-work", "routing-decisions.jsonl"), "utf8");
-    let total = 0;
-    for (const line of text.split(/\r?\n/).filter(Boolean)) {
-      try {
-        const record = JSON.parse(line);
-        if (record.type === "outcome" && String(record.model).startsWith("openrouter/")) {
-          total += Number(record.usage?.cost) || 0;
-        }
-      } catch {
-        // Ignore a partial or malformed telemetry line.
-      }
-    }
-    return total;
-  } catch {
-    return 0;
-  }
-}
-
 function usage(ctx: ExtensionContext) {
   let input = 0;
   let output = 0;
@@ -131,7 +110,7 @@ export function registerStatusFooter(pi: ExtensionAPI): void {
   const refresh = async (ctx: ExtensionContext) => {
     const currentGeneration = generation;
     const nextGit = await readGitSnapshot(ctx.cwd);
-    const nextCost = await readAgentOpenRouterCost(nextGit.root);
+    const nextCost = await readAgentOpenRouterCost(nextGit.root, ctx.sessionManager.getSessionId());
     if (currentGeneration !== generation) return;
     gitState = nextGit;
     agentOpenRouterCost = nextCost;
