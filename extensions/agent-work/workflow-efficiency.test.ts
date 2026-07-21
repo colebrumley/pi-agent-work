@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { ancestorEvidence, commandIdentity, createEvidenceManifest, finalGateBlockers, intermediateEvidencePlan, mayExecuteCommand, validateEvidenceManifest, type EvidenceRecord } from "./evidence.ts";
-import { classifyChangedSurface, consolidateFindings, recordReviewCompletion, reviewPlan, type ReviewLifecycleState } from "./review-lifecycle.ts";
+import { classifyChangedSurface, classifyChangedSurfaceFromDiff, consolidateFindings, recordReviewCompletion, reviewPlan, type ReviewLifecycleState } from "./review-lifecycle.ts";
 import { createPromptSlice, renderPromptSlice } from "./prompt-slice.ts";
 import type { RequirementsState } from "../../requirements/src/types.ts";
 
 const state: ReviewLifecycleState = { requirementsRevision: "rev-1", broadReviews: 1, findings: [] };
 const narrow = classifyChangedSurface({ files: ["src/ui.ts"], affectedRequirementIds: ["fr-ui"] });
 const expanded = classifyChangedSurface({ files: ["src/api.ts"], publicContractChanged: true });
+const detectedExpansion = classifyChangedSurfaceFromDiff({ files: ["extensions/agent-work/index.ts"], diff: "+pi.registerTool({ name: 'public-api' })\n+acceptanceTests.push('at-new')" });
+assert.ok(detectedExpansion.kinds.includes("public-contract"));
+assert.ok(detectedExpansion.kinds.includes("acceptance-scope"));
 
 assert.equal(reviewPlan(state, { phase: "amendment", requirementsRevision: "rev-1", commit: "a", highRisk: true, changedSurface: narrow }).mode, "focused");
 assert.equal(reviewPlan(state, { phase: "amendment", requirementsRevision: "rev-1", commit: "b", highRisk: true, changedSurface: narrow }).panel, false);

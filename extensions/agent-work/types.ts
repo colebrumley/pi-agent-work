@@ -1,7 +1,7 @@
 export const SCHEMA_VERSION = 1;
 
 export type TaskMode = "read" | "write";
-export type TaskState = "pending" | "running" | "review" | "done" | "blocked" | "failed" | "cancelled" | "integrated";
+export type TaskState = "pending" | "running" | "stalled" | "review" | "done" | "blocked" | "failed" | "cancelled" | "integrated";
 export type ProgressOperationKind = "delegation" | "review" | "verification" | "follow-up" | "integration";
 export type ProgressTerminalState = "success" | "failure" | "timeout" | "cancelled" | "unreachable";
 

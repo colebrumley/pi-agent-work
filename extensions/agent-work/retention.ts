@@ -73,6 +73,7 @@ export async function writeIntegrityManifest(root: string, address: AttemptAddre
 export async function verifyAttemptIntegrity(root: string, address: AttemptAddress): Promise<IntegrityManifest> {
   const base = dir(root, address); const ownership = await readJson<AttemptOwnership>(ownershipPath(base));
   if (ownership.schemaVersion !== 1 || ownership.kind !== "cbpi-attempt" || ownership.featureId !== safeId(address.featureId) || ownership.taskId !== safeId(address.taskId) || ownership.attempt !== address.attempt) throw new Error("Forged or mismatched cbpi attempt ownership");
+  if (!(await exists(integrityPath(base)))) throw new Error("Attempt integrity manifest is missing; diagnostics cannot be pruned safely. Re-run the owning orchestration or inspect the attempt.");
   const manifest = await readJson<IntegrityManifest>(integrityPath(base));
   if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.files)) throw new Error("Invalid attempt integrity manifest");
   for (const item of manifest.files) {

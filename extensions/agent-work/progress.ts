@@ -57,6 +57,8 @@ export interface ProgressMonitorOptions {
   clock?: ProgressClock;
   livenessCheck?: () => boolean | Promise<boolean>;
   onUnreachable?: () => void | Promise<void>;
+  onStall?: () => void | Promise<void>;
+  onRecovery?: () => void | Promise<void>;
   onDelivery?: (event: ProgressEvent) => void | Promise<void>;
 }
 
@@ -167,7 +169,7 @@ export class ProgressMonitor {
     this.lastActivityAt = this.clock.now();
     this.lastWarningAt = undefined;
     this.scheduleInactivityCheck();
-    if (wasInactive) void this.enqueueEmit("recovery", "Structured event activity resumed", "active");
+    if (wasInactive) { void this.options.onRecovery?.(); void this.enqueueEmit("recovery", "Structured event activity resumed", "active"); }
 
     const type = String(event.type ?? "");
     if (type === "agent_start") void this.changeFromEvent("generating", "Child agent started");
@@ -261,6 +263,7 @@ export class ProgressMonitor {
       await this.emit("stall", alive
         ? `No structured output for ${Math.floor((now - this.lastActivityAt) / 1000)}s; child is reachable`
         : "Child process is unreachable", "inactive");
+      if (alive) await this.options.onStall?.();
       if (!alive) await this.forceTerminate("unreachable", "Child process became unreachable");
     } finally {
       this.livenessPending = false;

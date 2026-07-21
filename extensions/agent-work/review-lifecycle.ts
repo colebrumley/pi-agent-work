@@ -69,6 +69,19 @@ export function classifyChangedSurface(input: {
   };
 }
 
+/** Conservative bounded-diff classifier. It never reads unrelated repository history. */
+export function classifyChangedSurfaceFromDiff(input: { files: string[]; diff: string; affectedRequirementIds?: string[] }): ChangedSurface {
+  const text = `${input.files.join("\n")}\n${input.diff}`.toLowerCase();
+  return classifyChangedSurface({
+    files: input.files,
+    affectedRequirementIds: input.affectedRequirementIds,
+    architectureChanged: /(^|\n)(src|extensions|lib)\/.*(router|lifecycle|storage|schema|migration|architecture)|\b(architecture|migration|concurrency|persistence)\b/.test(text),
+    trustSecurityBoundaryChanged: /\b(auth|authoriz|permission|credential|secret|token|security|trust.boundary)\b/.test(text),
+    publicContractChanged: /\b(public|export|api|endpoint|contract|schema|cli|registertool|parameters)\b/.test(text),
+    acceptanceScopeExpanded: /\b(acceptance|acceptancecriteria|acceptancetests|at-[a-z0-9_-]+)\b/.test(text),
+  });
+}
+
 export function reviewPlan(state: ReviewLifecycleState, request: ReviewRequest): ReviewPlan {
   if (state.requirementsRevision !== request.requirementsRevision) throw new Error("review lifecycle requirements revision mismatch");
   if (request.phase === "final") {

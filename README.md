@@ -44,6 +44,7 @@ pi install /absolute/path/to/pi-agent-work
 - `agent_ask` — resume the exact child session for follow-up or revision
 - `agent_review` — multi-perspective critique + independent high/critical verification
 - `agent_integrate` — cherry-pick a reviewed task commit
+- `agent_maintenance` — dry-run-first failed-diagnostic pruning, successful compaction, owned cleanup, and foreign Git diagnostics
 
 The interactive footer keeps Pi's token/cache, context, model/thinking, session, and extension-status information, and adds repository/branch/SHA, dirty and upstream divergence state. Cost is labeled `OR` and includes only OpenRouter-reported spend: direct calls in the current session plus repository-lifetime delegated-agent telemetry (shown separately as `agents`). Subscription-backed usage is excluded.
 
@@ -80,6 +81,8 @@ Optional explicit skill command: `/skill:requirements-interviewer`
             ├── invocation.json
             ├── handoff.json
             ├── evidence.json   # sanitized bounded builder evidence + artifact hashes
+            ├── evidence-manifest.json # hashed lineage-aware evidence records
+            ├── integrity.json, ownership.json, retention-audit.jsonl
             ├── events.jsonl
             ├── session.json
             ├── sessions/
@@ -104,7 +107,7 @@ Every settled run records one non-blocking reflection or an evidence-insufficien
 
 ## Progress and cancellation
 
-Delegation, review, verification, follow-up, and integration emit an immediate start update, meaningful phase/milestone updates, and a heartbeat every 20 seconds. After 60 seconds without child output or structured-event activity, the monitor checks liveness and warns every 60 seconds until activity resumes. Silence does not abort a live child; optional `hardTimeoutMs` is disabled by default.
+Delegation, review, verification, follow-up, and integration emit an immediate start update, meaningful phase/milestone updates, and a heartbeat every 20 seconds. A task is marked stalled only after ten minutes without model, tool, command-output, or heartbeat progress. There is no default total-duration kill; optional `hardTimeoutMs` remains an explicit override.
 
 Every update carries feature/task/attempt/operation IDs and is appended to `.agent-work/progress/` before best-effort live delivery. Use `agent_operation` to inspect, replay, list, or cancel. Cancellation terminates the child process tree, keeps artifacts/diagnostics, records one terminal event, and never automatically retries.
 
@@ -115,6 +118,10 @@ Progress distinguishes active work from inactivity by monitoring structured chil
 Every requirements package defines structured acceptance tests using the preferred fidelity order: real end-to-end, realistic smoke, integration, unit, then static checks. Higher-fidelity omissions require an explicit rationale; legitimately untestable cases require a test-specific user approval tied to the exact requirements revision, substitute verification, and residual risk.
 
 A writing task records bounded, sanitized evidence including commands, environment, scenarios, results, and artifact hashes. Review reruns every feasible required test and writes `verification-report.json` for the exact implementation commit and requirements revision. Integration refuses stale evidence, failed/non-runnable non-exempt tests, missing adversarial coverage, or unresolved verified high/critical findings. Any code change requires fresh review.
+
+The default review cadence is broad for the initial writing-task review, focused after a narrow `agent_ask(allowChanges=true)` amendment, and broad again only when the recorded changed surface expands architecture, trust/security boundaries, public contracts, or acceptance scope. `agent_review(mode="broad"|"focused"|"final-gate")` provides explicit overrides. Focused and final gates use one reviewer rather than a critique panel; high-risk final gates rerun exact-current checks and record fresh evidence.
+
+Successful integrated attempts compact raw event/query diagnostics after ownership and integrity checks. Failed, blocked, cancelled, and stalled diagnostics remain for 30 days and are only removed through `agent_maintenance(action="prune", dryRun=true)` followed by the returned token. Cleanup removes only clean, reachable, registered cbpi worktrees; foreign Git anomalies are report-only and repair plans never mutate them.
 
 ## Design contracts
 

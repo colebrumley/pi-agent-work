@@ -3,6 +3,7 @@ import { appendJsonl, exists, rootDir } from "./storage.ts";
 import type { EscalationDiagnosis, RouteRequest } from "./router.ts";
 
 export type RouteFeedbackOutcome = "accepted" | "corrected" | "failed";
+const diagnosisCategories = new Set(["task-complexity", "missing-context", "infrastructure", "prompt-quality"]);
 
 // Serialize read-before-append settlement in this process so simultaneous terminal paths stay idempotent.
 let settlementQueue: Promise<void> = Promise.resolve();
@@ -60,8 +61,14 @@ export async function settleTerminalRoute(
 export function escalationFromRouteFeedback(
   feedback: RouteFeedbackRecord,
 ): NonNullable<RouteRequest["escalation"]> | undefined {
-  if (feedback.outcome !== "failed" || !feedback.model || !feedback.diagnosis) return undefined;
+  if (feedback.outcome !== "failed" || !feedback.model || !validEscalationDiagnosis(feedback.diagnosis)) return undefined;
   return { previousModel: feedback.model, diagnosis: feedback.diagnosis };
+}
+
+export function validEscalationDiagnosis(value: unknown): value is EscalationDiagnosis {
+  if (!value || typeof value !== "object") return false;
+  const diagnosis = value as Partial<EscalationDiagnosis>;
+  return typeof diagnosis.category === "string" && diagnosisCategories.has(diagnosis.category) && typeof diagnosis.reason === "string" && diagnosis.reason.trim().length > 0;
 }
 
 export interface MissingRouteFeedbackDiagnostic {

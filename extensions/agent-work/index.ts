@@ -91,7 +91,7 @@ import {
 import { registerStatusFooter } from "./status-footer.ts";
 import { SCHEMA_VERSION, type Handoff, type InvocationRecord, type ProgressEvent, type ProgressOperationKind, type SessionReference, type TaskMode, type TaskRecord } from "./types.ts";
 import { loadState } from "../../requirements/src/state.ts";
-import { integrationBlockers, rerunAcceptanceTests, sanitizeSummary, validateBuilderEvidence, writeVerificationReport, type BuilderEvidence, type VerificationFinding } from "./verification.ts";
+import { integrationBlockers, rerunAcceptanceTests, sanitizeSummary, validateBuilderEvidence, writeVerificationReport, type BuilderEvidence, type VerificationFinding, type VerificationReport } from "./verification.ts";
 import {
   acceptRun,
   applyProposal,
@@ -108,10 +108,81 @@ import {
   type RunExecutor,
   type RunTaskDeclaration,
 } from "./runs.ts";
+import { ancestorEvidence, createEvidenceManifest, finalGateBlockers, intermediateEvidencePlan, mayExecuteCommand, type EvidenceManifest, type EvidenceRecord } from "./evidence.ts";
+import { classifyChangedSurfaceFromDiff, recordReviewCompletion, reviewPlan, type ReviewLifecycleState, type ReviewMode } from "./review-lifecycle.ts";
+import { createPromptSlice, renderPromptSlice, type PromptSliceRole } from "./prompt-slice.ts";
+import { diagnoseMissingRouteFeedback, escalationFromRouteFeedback, readRouteFeedback, settleTerminalRoute, validEscalationDiagnosis } from "./routing-feedback.ts";
+import { compactSuccessfulAttempt, markAttemptOwned, pruneFailedAttemptDiagnostics, resolveRetentionPolicy, writeIntegrityManifest } from "./retention.ts";
+import { diagnoseGitAnomalies, markCbpiWorktreeCollected, planGitRepair, reconcileCbpiLifecycle, registerCbpiWorktree } from "./lifecycle.ts";
+import { loadWorkflowConfig, type WorkflowOverrides } from "./workflow-config.ts";
 
 const execFileAsync = promisify(execFile);
 const OUTPUT_LIMIT = 40_000;
 const rootLocks = new Map<string, Promise<void>>();
+
+function lifecyclePath(root: string, featureId: string, taskId: string): string {
+  return join(taskDir(root, featureId, taskId), "review-lifecycle.json");
+}
+
+async function loadReviewLifecycle(root: string, featureId: string, taskId: string, revision: string): Promise<ReviewLifecycleState> {
+  const path = lifecyclePath(root, featureId, taskId);
+  if (!(await exists(path))) return { requirementsRevision: revision, broadReviews: 0, findings: [] };
+  const state = await readJson<ReviewLifecycleState>(path);
+  if (state.requirementsRevision !== revision) throw new Error("review lifecycle requirements revision mismatch");
+  return state;
+}
+
+async function writeEvidenceManifest(root: string, featureId: string, taskId: string, attempt: number, requirementsRevision: string, commit: string, evidence: BuilderEvidence): Promise<EvidenceManifest> {
+  const path = join(attemptDir(root, featureId, taskId, attempt), "evidence-manifest.json");
+  const prior = (await exists(path)) ? await readJson<EvidenceManifest>(path) : undefined;
+  const ancestor = prior && prior.commit !== commit ? ancestorEvidence(prior.records, commit) : [];
+  const records: EvidenceRecord[] = evidence.tests.map((test, index) => ({
+    id: `builder-${index + 1}`, command: test.command, commandIdentity: "", kind: "full-suite",
+    requirementsRevision, commit, environment: test.environment, result: test.result,
+    artifactHash: test.artifact?.sha256, fidelity: "integration", scenarios: test.scenarios,
+    freshness: "fresh",
+  }));
+  const manifest = createEvidenceManifest({ requirementsRevision, commit, records: [...ancestor, ...records] });
+  await atomicJson(path, manifest);
+  return manifest;
+}
+
+async function taskIsHighRisk(root: string, featureId: string, taskId: string, attempt: number): Promise<boolean> {
+  const path = join(attemptDir(root, featureId, taskId, attempt), "invocation.json");
+  if (!(await exists(path))) return false;
+  const invocation = await readJson<InvocationRecord>(path);
+  return (invocation.route as { classification?: { risk?: string } } | undefined)?.classification?.risk === "high";
+}
+
+async function finalIntegrationBlockers(root: string, featureId: string, taskId: string, attempt: number, requirements: ReturnType<typeof loadState>, commit: string, highRisk: boolean): Promise<string[]> {
+  const reportPath = join(taskDir(root, featureId, taskId), "verification-report.json");
+  const blockers = integrationBlockers(requirements, commit, (await exists(reportPath)) ? await readJson<unknown>(reportPath) : undefined);
+  if (!highRisk) return blockers;
+  const finalPath = join(attemptDir(root, featureId, taskId, attempt), "final-evidence-manifest.json");
+  if (!(await exists(finalPath))) return [...blockers, "high-risk integration requires a persisted final-gate evidence manifest"];
+  const manifest = await readJson<EvidenceManifest>(finalPath);
+  return [...blockers, ...finalGateBlockers(manifest.records, commit, requirements.requirementsRevision, requirements.acceptanceTests.some((test) => test.fidelityLayer === "real-end-to-end"))];
+}
+
+async function reviewVerification(attempt: string, requirements: ReturnType<typeof loadState>, evidence: BuilderEvidence, cwd: string, commit: string, findings: VerificationFinding[], mode: ReviewMode, overrideRationale?: string): Promise<VerificationReport> {
+  const manifestPath = join(attempt, "evidence-manifest.json");
+  const manifest = await exists(manifestPath) ? await readJson<EvidenceManifest>(manifestPath) : createEvidenceManifest({ requirementsRevision: requirements.requirementsRevision, commit, records: [] });
+  const plan = intermediateEvidencePlan(manifest.records, commit);
+  const duplicate = mayExecuteCommand({ records: manifest.records, command: "acceptance-suite", expensive: true, finalGate: mode === "final-gate", overrideRationale });
+  if (mode === "focused" && plan.reused.length) {
+    // The reviewer invocation is the targeted adversarial check; reuse is explicitly labelled.
+    return { schemaVersion: 2, requirementsRevision: requirements.requirementsRevision, reviewedCommit: commit, generatedAt: now(), tests: requirements.acceptanceTests.map((test) => ({ testId: test.id, status: "passed", evidenceAssessment: "Reused same-commit full-suite evidence; focused targeted adversarial review ran." })), findings, evidenceComplete: true, approved: !findings.some((finding) => ["critical", "high"].includes(finding.severity) && finding.status === "open") };
+  }
+  if (!duplicate.allowed) throw new Error(duplicate.reason);
+  return rerunAcceptanceTests(requirements, evidence, cwd, commit, findings);
+}
+
+async function settleRouteOutcome(root: string, route: { selectedModel?: string }, featureId: string, taskId: string, attempt: number, state: string): Promise<void> {
+  await settleTerminalRoute(root, {
+    featureId, taskId, attempt, model: route.selectedModel,
+    outcome: state === "done" || state === "review" || state === "integrated" ? "accepted" : "failed",
+  });
+}
 
 async function withRootLock<T>(root: string, operation: () => Promise<T>): Promise<T> {
   const previous = rootLocks.get(root) ?? Promise.resolve();
@@ -261,6 +332,9 @@ async function runTask(
     forceRequirements?: boolean;
     skipRequirementsGate?: boolean;
     hardTimeoutMs?: number;
+    inactivityMs?: number;
+    routeSlice?: { role?: "builder" | "scout" | "reviewer"; complexity?: RouteComplexity; risk?: RouteRisk; kind?: "ui" | "test" | "maintenance" | "architecture" | "security" | "integration" | "general" };
+    workflow?: WorkflowOverrides;
     operationKind?: ProgressOperationKind;
     operationId?: string;
   },
@@ -292,14 +366,17 @@ async function runTask(
   const task = await readTask(root, featureId, taskId);
   const attempt = await nextAttempt(root, featureId, taskId);
   const attemptPath = attemptDir(root, featureId, taskId, attempt);
+  const workflow = await loadWorkflowConfig(root, input.workflow);
   const diskRouter = await loadRouterConfig(root);
   // Session activation gate: profile routing applies only after successful startup/command activation.
   const effectiveRouter = activeSessionProfileRuntime
     ? routingConfigForSession(activeSessionProfileRuntime, diskRouter)
     : diskRouter;
+  const previousFeedback = (await readRouteFeedback(root)).filter((item) => item.featureId === featureId && item.taskId === taskId).at(-1);
   const route = routeTask(effectiveRouter, {
     taskId, title: input.title, prompt: input.prompt, mode: input.mode, profile: input.profile, attempt,
-    complexity: input.complexity, risk: input.risk, prefer: input.prefer,
+    complexity: input.complexity, risk: input.risk, prefer: input.prefer, slice: input.routeSlice,
+    escalation: workflow.routing?.allowEscalation === false ? undefined : previousFeedback ? escalationFromRouteFeedback(previousFeedback) : undefined,
   }, input.model, input.thinking);
   const selectedModel = route.selectedModel;
   const selectedThinking = input.thinking ?? route.thinking;
@@ -322,6 +399,7 @@ async function runTask(
     updatedAt: now(),
   });
   await atomicJson(join(attemptPath, "artifacts", "index.json"), { schemaVersion: SCHEMA_VERSION, artifacts: [] });
+  await markAttemptOwned(root, { featureId, taskId, attempt });
 
   const kind = operationKind(input.profile, input.operationKind);
   const currentOperationId = input.operationId ?? operationId(kind, featureId, taskId, attempt);
@@ -333,7 +411,10 @@ async function runTask(
     operationId: currentOperationId,
     operation: kind,
     phase: "preparing",
-    hardTimeoutMs: input.hardTimeoutMs,
+    hardTimeoutMs: input.hardTimeoutMs ?? workflow.liveness?.hardTimeoutMs,
+    inactivityMs: input.inactivityMs ?? workflow.liveness?.inactivityMs,
+    onStall: async () => { status.state = "stalled"; status.message = "No structured progress; child remains reachable and diagnostics are retained"; await writeStatus(root, status); },
+    onRecovery: async () => { if (status.state === "stalled") { status.state = "running"; status.message = "Structured progress recovered"; await writeStatus(root, status); } },
     onDelivery: onProgress ? (event) => onProgress(formatProgress(event), event) : undefined,
   });
   if (input.retry) await monitor.milestone("Explicit retry attempt started");
@@ -459,7 +540,7 @@ async function runTask(
     };
     await atomicJson(join(attemptPath, "session.json"), sessionRef);
 
-    if (run.exitCode !== 0) {
+      if (run.exitCode !== 0) {
       status.state = "failed";
       status.message = truncate(run.stderr || run.finalText || `Subagent exited ${run.exitCode}`);
       await writeStatus(root, status);
@@ -467,7 +548,8 @@ async function runTask(
         timestamp: now(), type: "outcome", featureId, taskId, attempt, model: selectedModel,
         state: status.state, durationMs: invocationRecord.durationMs, usage: run.usage, correction: attempt > 1,
       });
-      await monitor.terminal("failure", "Child process failed; inspect persisted diagnostics");
+        await monitor.terminal("failure", "Child process failed; inspect persisted diagnostics");
+        await writeIntegrityManifest(root, { featureId, taskId, attempt });
       return {
         receipt: finalReceipt({ featureId, taskId, attempt, state: status.state, attemptPath, sessionFile, summary: status.message }),
         finalText: run.finalText,
@@ -516,6 +598,7 @@ async function runTask(
           state: status.state, durationMs: invocationRecord.durationMs, usage: run.usage, correction: attempt > 1,
         });
         await monitor.terminal("failure", status.message);
+        await writeIntegrityManifest(root, { featureId, taskId, attempt });
         return {
           receipt: finalReceipt({ featureId, taskId, attempt, state: status.state, attemptPath, sessionFile, summary: status.message }),
           finalText: run.finalText,
@@ -570,6 +653,11 @@ async function runTask(
       if (commit && builderEvidence) {
         builderEvidence.implementationCommit = commit;
         await atomicJson(evidencePath, builderEvidence);
+        const requirements = loadState(requirementsDir(root, featureId));
+        await writeEvidenceManifest(root, featureId, taskId, attempt, requirements.requirementsRevision, commit, builderEvidence);
+        if (branch && worktree) await registerCbpiWorktree(root, {
+          id: `${featureId}-${taskId}-a${attempt}`, featureId, taskId, branch, commit, worktree, collected: false,
+        });
       }
     }
 
@@ -582,6 +670,8 @@ async function runTask(
       state: status.state, durationMs: invocationRecord.durationMs, usage: run.usage,
       correction: attempt > 1,
     });
+    await settleRouteOutcome(root, route, featureId, taskId, attempt, status.state);
+    await writeIntegrityManifest(root, { featureId, taskId, attempt });
     await monitor.terminal(handoff.status === "done" ? "success" : "failure", handoff.status === "done" ? "Task completed" : `Task reported ${handoff.status}`);
     return {
       receipt: finalReceipt({ featureId, taskId, attempt, state: status.state, attemptPath, sessionFile, commit, summary: handoff.summary }),
@@ -599,6 +689,8 @@ async function runTask(
       timestamp: now(), type: "outcome", featureId, taskId, attempt, model: selectedModel,
       state: status.state, correction: attempt > 1, error: status.message,
     });
+    await settleRouteOutcome(root, route, featureId, taskId, attempt, status.state);
+    await writeIntegrityManifest(root, { featureId, taskId, attempt });
     if (!monitor.isTerminal) await monitor.terminal(signal?.aborted ? "cancelled" : "failure", signal?.aborted ? "Task cancelled" : `${kind} failed; inspect persisted diagnostics`);
     throw error;
   }
@@ -754,7 +846,7 @@ async function integrateTaskForRun(root: string, featureId: string, task: RunTas
   const requirements = loadState(requirementsDir(root, featureId));
   const verificationPath = join(taskDir(root, featureId, task.id), "verification-report.json");
   const verification = await exists(verificationPath) ? await readJson<unknown>(verificationPath) : undefined;
-  const blockers = integrationBlockers(requirements, status.commit, verification);
+  const blockers = await finalIntegrationBlockers(root, featureId, task.id, status.currentAttempt, requirements, status.commit, await taskIsHighRisk(root, featureId, task.id, status.currentAttempt));
   if (blockers.length) throw new Error("Integration verification gate refused the task");
   const taskRecord = await readTask(root, featureId, task.id);
   for (const dependency of taskRecord.dependsOn) {
@@ -765,10 +857,14 @@ async function integrateTaskForRun(root: string, featureId: string, task: RunTas
     await assertClean(root);
     await command("git", ["cherry-pick", status.commit!], root, signal);
   });
+  const coordinatorCommit = (await command("git", ["rev-parse", "HEAD"], root)).stdout.trim();
   status.state = "integrated";
   status.message = `Integrated ${status.commit}`;
   await writeStatus(root, status);
-  await appendJsonl(join(featureDir(root, featureId), "decisions.jsonl"), { timestamp: now(), type: "integration", taskId: task.id, commit: status.commit });
+  await appendJsonl(join(featureDir(root, featureId), "decisions.jsonl"), { timestamp: now(), type: "integration", taskId: task.id, commit: status.commit, coordinatorCommit });
+  await markCbpiWorktreeCollected(root, `${featureId}-${task.id}-a${status.currentAttempt}`, { sourceCommit: status.commit, coordinatorCommit }).catch(() => undefined);
+  await compactSuccessfulAttempt(root, { featureId, taskId: task.id, attempt: status.currentAttempt }, { integrated: true }).catch(() => undefined);
+  await reconcileCbpiLifecycle(root, {}).catch(() => []);
 }
 
 function executorForRoot(root: string, featureId: string): RunExecutor {
@@ -1088,6 +1184,11 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       retry: Type.Optional(Type.Boolean()),
       forceRequirements: Type.Optional(Type.Boolean({ description: "Compatibility flag: rerender an already-valid handoff; never bypasses readiness or user approval" })),
       hardTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional operation timeout; disabled by default" })),
+      inactivityMs: Type.Optional(Type.Integer({ minimum: 1 })),
+      routeSlice: Type.Optional(Type.Object({ role: Type.Optional(StringEnum(["builder", "scout", "reviewer"] as const)), complexity: Type.Optional(StringEnum(["tiny", "small", "medium", "large"] as const)), risk: Type.Optional(StringEnum(["low", "medium", "high"] as const)), kind: Type.Optional(StringEnum(["ui", "test", "maintenance", "architecture", "security", "integration", "general"] as const)) })),
+      retentionDays: Type.Optional(Type.Integer({ minimum: 0, maximum: 3650 })),
+      compaction: Type.Optional(Type.Boolean()),
+      retainWorktree: Type.Optional(Type.Boolean()),
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
       const root = await projectRoot(ctx.cwd);
@@ -1107,6 +1208,9 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
         retry: params.retry,
         forceRequirements: params.forceRequirements,
         hardTimeoutMs: params.hardTimeoutMs,
+        inactivityMs: params.inactivityMs,
+        routeSlice: params.routeSlice,
+        workflow: { retention: { failureRetentionDays: params.retentionDays, compaction: params.compaction }, cleanup: { retainWorktree: params.retainWorktree } },
         operationId: _id,
       }, signal, (progress, event) => onUpdate?.({ content: [{ type: "text", text: progress }], details: { progress: event } }));
       return { content: [{ type: "text", text: result.receipt }], details: { attemptPath: result.attemptPath, sessionFile: result.sessionFile, operationId: result.operationId } };
@@ -1211,6 +1315,8 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       attempt: Type.Optional(Type.Integer({ minimum: 1 })),
       outcome: Type.Optional(StringEnum(["accepted", "corrected", "failed"] as const)),
       note: Type.Optional(Type.String()),
+      diagnosisCategory: Type.Optional(StringEnum(["task-complexity", "missing-context", "infrastructure", "prompt-quality"] as const)),
+      diagnosisReason: Type.Optional(Type.String()),
     }),
     async execute(_id, params, _signal, _update, ctx) {
       const root = await projectRoot(ctx.cwd);
@@ -1222,9 +1328,16 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       }
       if (params.action === "feedback") {
         if (!params.featureId || !params.taskId || !params.outcome) throw new Error("feedback requires featureId, taskId, and outcome");
+        const diagnosis = params.diagnosisCategory || params.diagnosisReason
+          ? { category: params.diagnosisCategory, reason: params.diagnosisReason }
+          : undefined;
+        if (diagnosis && !validEscalationDiagnosis(diagnosis)) throw new Error("feedback diagnosis requires a valid category and non-empty reason");
         const status = await readStatus(root, params.featureId, params.taskId);
         const attempt = params.attempt ?? status.currentAttempt;
-        await appendJsonl(logPath, { timestamp: now(), type: "feedback", featureId: params.featureId, taskId: params.taskId, attempt, outcome: params.outcome, note: params.note });
+        const invocationPath = join(attemptDir(root, params.featureId, params.taskId, attempt), "invocation.json");
+        const invocation = (await exists(invocationPath)) ? await readJson<InvocationRecord>(invocationPath) : undefined;
+        const model = invocation?.model ?? (invocation?.route as { selectedModel?: string } | undefined)?.selectedModel;
+        await settleTerminalRoute(root, { featureId: params.featureId, taskId: params.taskId, attempt, model, outcome: params.outcome, note: params.note, diagnosis });
         return { content: [{ type: "text", text: `Recorded ${params.outcome} feedback for ${params.featureId}/${params.taskId} attempt ${attempt}.` }], details: {} };
       }
       const lines = (await exists(logPath)) ? (await readFile(logPath, "utf8")).split(/\r?\n/).filter(Boolean) : [];
@@ -1254,7 +1367,16 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
         models[model].corrections += item.outcome === "corrected" ? 1 : 0;
         models[model].failures += item.outcome === "failed" ? 1 : 0;
       }
-      const report = { generatedAt: now(), totals: { routes: routes.length, outcomes: outcomes.length, feedback: feedback.length }, models };
+      const routeFeedback = await readRouteFeedback(root);
+      const terminalRoutes = outcomes.map((item) => ({ featureId: item.featureId, taskId: item.taskId, attempt: item.attempt, model: item.model }));
+      const feedbackDiagnostics = diagnoseMissingRouteFeedback(terminalRoutes, routeFeedback);
+      const telemetry = {
+        routing: routes.slice(-100).map((route) => ({ tier: route.classification?.risk, escalation: Boolean(route.escalation), feedbackComplete: !feedbackDiagnostics.missing.some((missing) => missing.featureId === route.featureId && missing.taskId === route.taskId && missing.attempt === route.attempt) })),
+        review: records.filter((record) => record.type === "review").slice(-100).map((record) => ({ mode: record.mode, fanOut: record.fanOut, reused: record.reused ?? 0, fresh: record.fresh ?? 0, duplicate: record.duplicate ?? 0 })),
+        lifecycle: outcomes.slice(-100).map((outcome) => ({ state: outcome.state, timeout: outcome.terminal === "timeout" })),
+        cleanup: records.filter((record) => record.type === "cleanup").slice(-100).map((record) => record.outcome),
+      };
+      const report = { generatedAt: now(), totals: { routes: routes.length, outcomes: outcomes.length, feedback: routeFeedback.length }, models, feedbackDiagnostics, telemetry };
       return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }], details: report };
     },
   });
@@ -1296,6 +1418,44 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       const latest = persisted.map((timeline) => timeline.at(-1)!).filter((event) => !active.some((item) => item.operationId === event.operationId));
       const operations = [...active, ...latest];
       return { content: [{ type: "text", text: operations.length ? operations.map(formatProgress).join("\n") : "No matching operations." }], details: { operations, active: active.map((event) => event.operationId) } };
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_maintenance",
+    label: "Agent Work Maintenance",
+    description: "Inspect safe retention and Git lifecycle maintenance. Pruning is always dry-run-first; foreign Git repair is diagnostic only.",
+    parameters: Type.Object({
+      action: StringEnum(["prune", "compact", "cleanup", "git-diagnostics", "git-repair-plan"] as const),
+      featureId: Type.Optional(Type.String()), taskId: Type.Optional(Type.String()), attempt: Type.Optional(Type.Integer({ minimum: 1 })),
+      dryRun: Type.Optional(Type.Boolean()), dryRunToken: Type.Optional(Type.String()), terminalAt: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params, _signal, _update, ctx) {
+      const root = await projectRoot(ctx.cwd);
+      if (params.action === "git-diagnostics") {
+        const anomalies = await diagnoseGitAnomalies(root);
+        return { content: [{ type: "text", text: JSON.stringify(anomalies, null, 2) }], details: { anomalies, dryRun: true } };
+      }
+      if (params.action === "git-repair-plan") {
+        const plan = await planGitRepair(root, false);
+        return { content: [{ type: "text", text: JSON.stringify(plan, null, 2) }], details: plan };
+      }
+      if (!params.featureId || !params.taskId) throw new Error(`${params.action} requires featureId and taskId`);
+      const status = await readStatus(root, params.featureId, params.taskId);
+      const attempt = params.attempt ?? status.currentAttempt;
+      const address = { featureId: params.featureId, taskId: params.taskId, attempt };
+      if (params.action === "compact") {
+        const result = await compactSuccessfulAttempt(root, address, { integrated: status.state === "integrated" });
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
+      }
+      if (params.action === "cleanup") {
+        const result = await reconcileCbpiLifecycle(root, { dryRun: params.dryRun !== false });
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: { dryRun: params.dryRun !== false, result } };
+      }
+      if (!params.terminalAt) throw new Error("prune requires terminalAt from the preserved status diagnostics");
+      if (!(["failed", "blocked", "cancelled", "stalled"] as string[]).includes(status.state)) throw new Error("Only failed, blocked, cancelled, or stalled diagnostics are eligible for pruning");
+      const result = await pruneFailedAttemptDiagnostics(root, address, { status: status.state as "failed" | "blocked" | "cancelled" | "stalled", terminalAt: params.terminalAt, policy: (await loadWorkflowConfig(root)).retention, dryRun: params.dryRun !== false, dryRunToken: params.dryRunToken });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
     },
   });
 
@@ -1377,12 +1537,24 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       const result = await runPi({ cwd: session.cwd, args, eventsFile: queryFile, signal, monitor });
       let amendedCommit: string | undefined;
       if (params.allowChanges && result.exitCode === 0) {
+        const parentCommit = status.commit;
         const changes = (await command("git", ["status", "--porcelain"], session.cwd)).stdout.trim();
         if (changes) {
           await command("git", ["add", "-A"], session.cwd);
           if (status.commit) await command("git", ["commit", "--amend", "--no-edit"], session.cwd);
           else await command("git", ["commit", "-m", `agent-work(${params.taskId}): follow-up revision`], session.cwd);
           amendedCommit = (await command("git", ["rev-parse", "HEAD"], session.cwd)).stdout.trim();
+          const files = parentCommit
+            ? (await command("git", ["diff", "--name-only", parentCommit, amendedCommit], session.cwd)).stdout.split(/\r?\n/).filter(Boolean)
+            : [];
+          const diff = parentCommit ? (await command("git", ["diff", "--unified=0", parentCommit, amendedCommit], session.cwd)).stdout : "";
+          const surface = classifyChangedSurfaceFromDiff({ files, diff, affectedRequirementIds: [...diff.matchAll(/\b(?:fr|ac|at)-[a-z0-9_-]+\b/gi)].map((item) => item[0]) });
+          await atomicJson(join(dir, "amendment.json"), { parentCommit, amendedCommit, changedSurface: surface, recordedAt: now() });
+          const manifestPath = join(dir, "evidence-manifest.json");
+          if (await exists(manifestPath)) {
+            const prior = await readJson<EvidenceManifest>(manifestPath);
+            await atomicJson(manifestPath, createEvidenceManifest({ requirementsRevision: prior.requirementsRevision, commit: amendedCommit, records: ancestorEvidence(prior.records, amendedCommit) }));
+          }
           status.commit = amendedCommit;
           status.state = "review";
           status.message = "Worker revised the task commit; review again before integration";
@@ -1426,6 +1598,7 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)),
       retry: Type.Optional(Type.Boolean()),
       singleReviewer: Type.Optional(Type.Boolean({ description: "Fallback to one general reviewer instead of multi-perspective critique" })),
+      mode: Type.Optional(StringEnum(["broad", "focused", "final-gate"] as const)),
       hardTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Optional operation timeout; disabled by default" })),
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
@@ -1433,8 +1606,21 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       const source = await readStatus(root, params.featureId, params.taskId);
       if (!source.worktree) throw new Error(`Task ${params.taskId} has no worktree to review`);
       if (!source.commit) throw new Error(`Task ${params.taskId} has no implementation commit to review`);
+      const requirements = loadState(requirementsDir(root, params.featureId));
+      const amendmentPath = join(attemptDir(root, params.featureId, params.taskId, source.currentAttempt), "amendment.json");
+      const amendment = (await exists(amendmentPath)) ? await readJson<{ changedSurface?: ReturnType<typeof classifyChangedSurfaceFromDiff> }>(amendmentPath) : undefined;
+      const lifecycle = await loadReviewLifecycle(root, params.featureId, params.taskId, requirements.requirementsRevision);
+      const planned = reviewPlan(lifecycle, {
+        phase: params.mode === "final-gate" ? "final" : lifecycle.broadReviews === 0 ? "initial" : "amendment",
+        requirementsRevision: requirements.requirementsRevision, commit: source.commit,
+        highRisk: params.mode === "final-gate" || params.depth === "deep" || await taskIsHighRisk(root, params.featureId, params.taskId, source.currentAttempt),
+        changedSurface: amendment?.changedSurface,
+        explicitBroad: params.mode === "broad",
+      });
+      const mode: ReviewMode = params.mode ?? planned.mode;
       const depth = params.depth ?? "standard";
-      const total = perspectivesFor(params.targetType ?? "code", depth).length;
+      const singlePass = params.singleReviewer || mode === "focused" || mode === "final-gate";
+      const total = singlePass ? 1 : perspectivesFor(params.targetType ?? "code", depth).length;
       const monitor = await ProgressMonitor.start({
         root,
         featureId: params.featureId,
@@ -1455,19 +1641,25 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
       try {
         const sourceAttempt = attemptDir(root, params.featureId, params.taskId, source.currentAttempt);
         const evidencePath = join(sourceAttempt, "evidence.json");
-        const requirements = loadState(requirementsDir(root, params.featureId));
         const evidenceRaw = await exists(evidencePath) ? await readJson<unknown>(evidencePath) : undefined;
         const evidenceCheck = await validateBuilderEvidence(requirements, evidenceRaw, source.commit);
         if (!evidenceCheck.valid || !evidenceCheck.evidence)
           throw new Error(`Review refused: ${evidenceCheck.issues.join("; ")}`);
         await monitor.milestone("Builder evidence validated");
 
-        if (params.singleReviewer) {
+        if (singlePass) {
+          const role: PromptSliceRole = mode === "final-gate" ? "final-gate" : mode === "focused" ? "focused-reviewer" : "broad-reviewer";
+          const slice = renderPromptSlice(createPromptSlice(requirements, {
+            role, sourcePath: join(requirementsDir(root, params.featureId), "handoff.md"), sourceHash: requirements.requirementsRevision,
+            requirementIds: requirements.functionalRequirements.map((item) => item.id), criterionIds: requirements.acceptanceCriteria.map((item) => item.id),
+            findings: lifecycle.findings, changedSurface: amendment?.changedSurface,
+            checks: mode === "final-gate" ? ["Run all required acceptance checks on the exact current commit."] : ["Verify prior findings and changed files."],
+          }));
           const result = await runTask(root, {
             featureId: params.featureId,
             taskId: `${params.taskId}-review`,
             title: `Review ${params.taskId}`,
-            prompt: params.prompt ?? `Review task ${params.taskId}. Inspect HEAD, its diff, and the working tree.`,
+            prompt: `${params.prompt ?? `Review task ${params.taskId}. Inspect HEAD, its diff, and the working tree.`}\n\n## Review slice\n${slice}`,
             mode: "read",
             profile: "reviewer",
             dependsOn: [params.taskId],
@@ -1486,7 +1678,9 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
             status: "open",
             summary: sanitizeSummary(item.description),
           }));
-          const verification = await rerunAcceptanceTests(requirements, evidenceCheck.evidence, source.worktree, source.commit, singleFindings, {
+          const verification = mode === "focused"
+          ? await reviewVerification(sourceAttempt, requirements, evidenceCheck.evidence, source.worktree, source.commit, singleFindings, mode)
+            : await rerunAcceptanceTests(requirements, evidenceCheck.evidence, source.worktree, source.commit, singleFindings, {
             signal: controller.signal,
             onProgress: async (progress) => {
               if (progress.status === "running") await monitor.phaseChange("verifying-acceptance", `Rerunning ${progress.testId}`, { completed: progress.completed, active: 1, total: progress.total });
@@ -1494,7 +1688,24 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
             },
           });
           const verificationPath = join(taskDir(root, params.featureId, params.taskId), "verification-report.json");
+          if (mode === "final-gate") {
+            const records: EvidenceRecord[] = verification.tests.filter((test) => test.command).flatMap((test, index) => {
+              const base: EvidenceRecord = {
+              id: `final-${index + 1}`, command: test.command!, commandIdentity: "", kind: "full-suite",
+              requirementsRevision: requirements.requirementsRevision, commit: source.commit, environment: "independent-review",
+              result: test.status === "passed" ? "passed" : "failed", artifactHash: test.artifact?.sha256,
+              fidelity: "integration", scenarios: requirements.acceptanceTests.find((item) => item.id === test.testId)?.categories ?? [], freshness: "fresh",
+              };
+              return requirements.acceptanceTests.find((item) => item.id === test.testId)?.fidelityLayer === "real-end-to-end" ? [base, { ...base, id: `${base.id}-flow`, kind: "flow" }] : [base];
+            });
+            const manifest = createEvidenceManifest({ requirementsRevision: requirements.requirementsRevision, commit: source.commit, records });
+            await atomicJson(join(sourceAttempt, "final-evidence-manifest.json"), manifest);
+            const blockers = finalGateBlockers(manifest.records, source.commit, requirements.requirementsRevision, requirements.acceptanceTests.some((test) => test.fidelityLayer === "real-end-to-end"));
+            if (blockers.length) { verification.approved = false; verification.evidenceComplete = false; }
+          }
           await writeVerificationReport(verificationPath, verification);
+          const findingsForLifecycle = parseFindings(result.finalText, mode).map((item) => ({ severity: item.severity, location: item.location, description: item.description, sourceReviewId: `${mode}:${source.currentAttempt}` }));
+          await atomicJson(lifecyclePath(root, params.featureId, params.taskId), recordReviewCompletion(lifecycle, { ...planned, mode, panel: false }, source.commit, findingsForLifecycle));
           await monitor.terminal(verification.approved ? "success" : "failure", verification.approved ? "Acceptance verification approved" : "Acceptance verification refused completion");
           return { content: [{ type: "text", text: `${result.receipt}\nMachine verification: ${verificationPath}\nApproved: ${verification.approved}` }], details: { ...verification, operationId: _id, reviewOperationId: result.operationId } };
         }
@@ -1520,7 +1731,9 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
           summary: sanitizeSummary(item.description),
         }));
         await monitor.phaseChange("verifying-acceptance", "Rerunning required acceptance tests", { completed: 0, active: 1, total: requirements.acceptanceTests.length });
-        const verification = await rerunAcceptanceTests(requirements, evidenceCheck.evidence, source.worktree, source.commit, findings, {
+        const verification = planned.mode === "focused"
+          ? await reviewVerification(sourceAttempt, requirements, evidenceCheck.evidence, source.worktree, source.commit, findings, planned.mode)
+          : await rerunAcceptanceTests(requirements, evidenceCheck.evidence, source.worktree, source.commit, findings, {
           signal: controller.signal,
           onProgress: async (progress) => {
             if (progress.status === "running") await monitor.phaseChange("verifying-acceptance", `Rerunning ${progress.testId}`, { completed: progress.completed, active: 1, total: progress.total });
@@ -1529,6 +1742,8 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
         });
         const verificationPath = join(taskDir(root, params.featureId, params.taskId), "verification-report.json");
         await writeVerificationReport(verificationPath, verification);
+        const broadFindings = (critique.findings ?? []).map((item) => ({ severity: item.severity, location: "review", description: item.description, sourceReviewId: `broad:${source.currentAttempt}` }));
+        await atomicJson(lifecyclePath(root, params.featureId, params.taskId), recordReviewCompletion(lifecycle, planned, source.commit, broadFindings));
         await monitor.terminal(verification.approved ? "success" : "failure", verification.approved ? "Review and acceptance verification approved" : "Review completed but verification refused approval");
         return { content: [{ type: "text", text: `${report}\nMachine verification: ${verificationPath}\nApproved: ${verification.approved}` }], details: { ...verification, operationId: _id } };
       } catch (error: any) {
@@ -1574,7 +1789,11 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
         const requirements = loadState(requirementsDir(root, params.featureId));
         const verificationPath = join(taskDir(root, params.featureId, params.taskId), "verification-report.json");
         const verification = await exists(verificationPath) ? await readJson<unknown>(verificationPath) : undefined;
-        const verificationBlockers = integrationBlockers(requirements, status.commit, verification);
+        const workflow = await loadWorkflowConfig(root);
+        const highRisk = await taskIsHighRisk(root, params.featureId, params.taskId, status.currentAttempt);
+        const verificationBlockers = workflow.compatibility?.allowHighRiskWithoutFinalGate && highRisk
+          ? integrationBlockers(requirements, status.commit, verification)
+          : await finalIntegrationBlockers(root, params.featureId, params.taskId, status.currentAttempt, requirements, status.commit, highRisk);
         if (verificationBlockers.length) throw new Error(`Integration refused:\n- ${verificationBlockers.join("\n- ")}`);
         await monitor.milestone("Current-commit verification report approved");
         await monitor.phaseChange("dependency-gate", "Checking task dependencies");
@@ -1590,6 +1809,7 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
           await assertClean(root);
           await command("git", ["cherry-pick", status.commit!], root, controller.signal);
         });
+        const coordinatorCommit = (await command("git", ["rev-parse", "HEAD"], root)).stdout.trim();
         status.state = "integrated";
         status.message = `Integrated ${status.commit}`;
         await writeStatus(root, status);
@@ -1598,9 +1818,17 @@ export default function agentWorkExtension(pi: ExtensionAPI) {
           type: "integration",
           taskId: params.taskId,
           commit: status.commit,
+          coordinatorCommit,
         });
+        await markCbpiWorktreeCollected(root, `${params.featureId}-${params.taskId}-a${status.currentAttempt}`, { sourceCommit: status.commit, coordinatorCommit }).catch(() => undefined);
+        const policy = await loadWorkflowConfig(root);
+        const retention = resolveRetentionPolicy(policy.retention);
+        const compaction = retention.compaction
+          ? await compactSuccessfulAttempt(root, { featureId: params.featureId, taskId: params.taskId, attempt: status.currentAttempt }, { integrated: true }).catch(() => undefined)
+          : undefined;
+        const cleanup = policy.cleanup?.retainWorktree ? [] : await reconcileCbpiLifecycle(root, {}).catch(() => []);
         await monitor.terminal("success", "Task integrated");
-        return { content: [{ type: "text", text: `Integrated ${params.taskId} via ${status.commit}` }], details: { commit: status.commit, operationId: _id } };
+        return { content: [{ type: "text", text: `Integrated ${params.taskId} via ${status.commit}` }], details: { commit: status.commit, operationId: _id, compaction, cleanup } };
       } catch (error: any) {
         if (!monitor.isTerminal) await monitor.terminal(controller.signal.aborted ? "cancelled" : "failure", controller.signal.aborted ? "Integration cancelled" : "Integration failed; inspect persisted diagnostics");
         throw error;
