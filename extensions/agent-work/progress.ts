@@ -19,6 +19,29 @@ const systemClock: ProgressClock = {
   clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
 };
 
+/** Default liveness threshold: long work is never killed merely for elapsed duration. */
+export const DEFAULT_STALL_MS = 10 * 60_000;
+
+export interface ProgressLiveness {
+  lastProgressAt: number;
+  stalled: boolean;
+  stalledAt?: number;
+}
+
+/**
+ * Deterministically derives liveness from persisted progress timestamps. Reprocessing the
+ * same timeline (including after a restart) produces the same result and never emits data.
+ */
+export function deriveProgressLiveness(
+  progressAt: readonly number[],
+  nowMs: number,
+  inactivityMs = DEFAULT_STALL_MS,
+): ProgressLiveness {
+  const lastProgressAt = progressAt.reduce((latest, timestamp) => Math.max(latest, timestamp), 0);
+  const stalled = nowMs - lastProgressAt >= inactivityMs;
+  return { lastProgressAt, stalled, stalledAt: stalled ? lastProgressAt + inactivityMs : undefined };
+}
+
 export interface ProgressMonitorOptions {
   root: string;
   featureId: string;
@@ -108,6 +131,7 @@ export class ProgressMonitor {
   }
 
   get isTerminal(): boolean { return this.terminalState !== undefined; }
+  get isStalled(): boolean { return !this.isTerminal && this.activityState() === "inactive"; }
 
   setCancelHandler(cancel: () => void | Promise<void>): void {
     const active = activeOperations.get(this.options.operationId);
@@ -142,6 +166,7 @@ export class ProgressMonitor {
     const wasInactive = this.lastWarningAt !== undefined;
     this.lastActivityAt = this.clock.now();
     this.lastWarningAt = undefined;
+    this.scheduleInactivityCheck();
     if (wasInactive) void this.enqueueEmit("recovery", "Structured event activity resumed", "active");
 
     const type = String(event.type ?? "");
@@ -196,11 +221,11 @@ export class ProgressMonitor {
 
   private startTimers(): void {
     const heartbeatMs = this.options.heartbeatMs ?? 20_000;
-    const inactivityMs = this.options.inactivityMs ?? 60_000;
+    const inactivityMs = this.options.inactivityMs ?? DEFAULT_STALL_MS;
     this.heartbeatHandle = this.clock.setInterval(() => {
       if (!this.isTerminal) void this.enqueueEmit("heartbeat", "Heartbeat", this.activityState());
     }, heartbeatMs);
-    this.inactivityHandle = this.clock.setInterval(() => { void this.checkInactivity(); }, inactivityMs);
+    this.scheduleInactivityCheck(inactivityMs);
     if (this.options.hardTimeoutMs !== undefined) {
       this.timeoutHandle = this.clock.setTimeout(() => {
         void this.forceTerminate("timeout", `Configured hard timeout expired after ${this.options.hardTimeoutMs}ms`);
@@ -215,13 +240,18 @@ export class ProgressMonitor {
     this.heartbeatHandle = this.inactivityHandle = this.timeoutHandle = undefined;
   }
 
+  private scheduleInactivityCheck(inactivityMs = this.options.inactivityMs ?? DEFAULT_STALL_MS): void {
+    if (this.inactivityHandle !== undefined) this.clock.clearTimeout(this.inactivityHandle);
+    this.inactivityHandle = this.clock.setTimeout(() => { void this.checkInactivity(); }, inactivityMs);
+  }
+
   private activityState(): ProgressEvent["activity"] {
-    return this.clock.now() - this.lastActivityAt >= (this.options.inactivityMs ?? 60_000) ? "inactive" : "active";
+    return this.clock.now() - this.lastActivityAt >= (this.options.inactivityMs ?? DEFAULT_STALL_MS) ? "inactive" : "active";
   }
 
   private async checkInactivity(): Promise<void> {
     if (this.isTerminal || this.livenessPending) return;
-    const inactivityMs = this.options.inactivityMs ?? 60_000;
+    const inactivityMs = this.options.inactivityMs ?? DEFAULT_STALL_MS;
     const now = this.clock.now();
     if (now - this.lastActivityAt < inactivityMs || (this.lastWarningAt !== undefined && now - this.lastWarningAt < inactivityMs)) return;
     this.livenessPending = true;
@@ -234,6 +264,7 @@ export class ProgressMonitor {
       if (!alive) await this.forceTerminate("unreachable", "Child process became unreachable");
     } finally {
       this.livenessPending = false;
+      if (!this.isTerminal) this.scheduleInactivityCheck(inactivityMs);
     }
   }
 

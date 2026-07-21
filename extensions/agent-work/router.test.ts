@@ -35,6 +35,7 @@ import {
   type ModelAuthInspector,
   type RouterConfig,
   type RouterConfigV1,
+  type UtilityRouting,
 } from "./router.ts";
 import { atomicJson, rootDir } from "./storage.ts";
 
@@ -361,6 +362,34 @@ function baseReq(over: Partial<Parameters<typeof routeTask>[1]> = {}) {
     assert.equal(config.activeProfile, name);
   }
   console.log("at-7 explicit override passed");
+}
+
+// Slice-first selection is independent of any parent-feature risk and model identifiers.
+{
+  const threeTier: UtilityRouting = {
+    mode: "utility", weights: { cost: 1, speed: 0, quality: 0 }, subscriptionScarcityPenalty: 0,
+    models: [
+      { model: "fixture/cheap", label: "cheap", roles: ["builder", "scout"], quality: 0.75, speed: 0.5, relativeCost: 0.05, qualityTier: 1 },
+      { model: "fixture/standard", label: "standard", roles: ["builder", "scout"], quality: 0.9, speed: 0.5, relativeCost: 0.3, qualityTier: 2 },
+      { model: "fixture/top", label: "top", roles: ["builder", "scout"], quality: 0.99, speed: 0.5, relativeCost: 0.8, qualityTier: 3, escalationOnly: true },
+    ],
+  };
+  const config: RouterConfig = { schemaVersion: 2, enabled: true, activeProfile: "fixture", profiles: [{ name: "fixture", coordinatorModel: "fixture/top", routing: threeTier }] };
+  for (const kind of ["ui", "test", "maintenance"] as const) {
+    const decision = routeTask(config, baseReq({ mode: "read", slice: { kind, complexity: "small", risk: "low", role: "scout" } }));
+    assert.equal(decision.selectedModel, "fixture/cheap", `${kind} slice uses cheapest eligible tier`);
+  }
+  for (const kind of ["architecture", "security", "integration"] as const) {
+    const decision = routeTask(config, baseReq({ slice: { kind, complexity: "medium", risk: "high", role: "builder" } }));
+    assert.equal(decision.selectedModel, "fixture/top", `${kind} high-risk slice uses highest configured tier`);
+  }
+  const unDiagnosed = routeTask(config, baseReq({ slice: { kind: "general", complexity: "small", risk: "low", role: "builder" }, attempt: 2, escalation: { previousModel: "fixture/cheap" } }));
+  assert.equal(unDiagnosed.selectedModel, "fixture/cheap", "retry alone cannot increase tier");
+  const diagnosed = routeTask(config, baseReq({ slice: { kind: "general", complexity: "small", risk: "low", role: "builder" }, attempt: 2, escalation: { previousModel: "fixture/cheap", diagnosis: { category: "task-complexity", reason: "needs broader reasoning" } } }));
+  assert.equal(diagnosed.selectedModel, "fixture/standard");
+  assert.equal(diagnosed.escalation?.diagnosis.category, "task-complexity");
+  assert.match(diagnosed.reason, /task-complexity/);
+  console.log("slice-first tier routing passed");
 }
 
 // --- at-8 Malformed profile-name and shape boundaries ---

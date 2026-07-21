@@ -6,6 +6,8 @@ import type { TaskMode } from "./types.ts";
 export type RouteComplexity = "tiny" | "small" | "medium" | "large";
 export type RouteRisk = "low" | "medium" | "high";
 export type RouteRole = "builder" | "scout" | "reviewer";
+export type TaskSliceKind = "ui" | "test" | "maintenance" | "architecture" | "security" | "integration" | "general";
+export type EscalationDiagnosisCategory = "task-complexity" | "missing-context" | "infrastructure" | "prompt-quality";
 export type ProfileRoutingMode = "utility" | "pinned";
 
 export const SOL_MODEL = "openai-codex/gpt-5.6-sol";
@@ -29,6 +31,8 @@ export interface RouterModel {
   enabled?: boolean;
   /** When true, model is only selected if no non-escalation eligible model meets the quality floor. */
   escalationOnly?: boolean;
+  /** Configured quality tier; higher tiers are reserved for high-risk slices and diagnosed escalation. */
+  qualityTier?: number;
 }
 
 export interface UtilityRouting {
@@ -76,6 +80,16 @@ export interface RouteRequest {
   complexity?: RouteComplexity;
   risk?: RouteRisk;
   prefer?: "cost" | "speed" | "quality" | "balanced";
+  /** Explicit bounded-slice metadata. Parent-feature metadata is intentionally not considered. */
+  slice?: Partial<{ role: RouteRole; complexity: RouteComplexity; risk: RouteRisk; kind: TaskSliceKind }>;
+  /** A failed lower tier may only be retried at a higher tier with this persisted diagnosis. */
+  escalation?: { previousModel: string; diagnosis?: EscalationDiagnosis };
+}
+
+export interface EscalationDiagnosis {
+  category: EscalationDiagnosisCategory;
+  reason: string;
+  recordedAt?: string;
 }
 
 export interface RouteDecision {
@@ -85,9 +99,10 @@ export interface RouteDecision {
   thinking?: string;
   source: "router" | "explicit" | "pi-default";
   activeProfile?: string;
-  classification: { complexity: RouteComplexity; risk: RouteRisk; role: RouteRole };
+  classification: { complexity: RouteComplexity; risk: RouteRisk; role: RouteRole; kind: TaskSliceKind };
   requiredQuality: number;
   reason: string;
+  escalation?: { previousModel: string; diagnosis: EscalationDiagnosis };
   candidates: Array<{ model: string; eligible: boolean; score: number; quality: number; speed: number; effectiveCost: number }>;
 }
 
@@ -166,6 +181,7 @@ function cloneRouterModel(model: RouterModel): RouterModel {
   if (model.subscription === true) cloned.subscription = true;
   if (typeof model.enabled === "boolean") cloned.enabled = model.enabled;
   if (model.escalationOnly === true) cloned.escalationOnly = true;
+  if (typeof model.qualityTier === "number") cloned.qualityTier = model.qualityTier;
   return cloned;
 }
 
@@ -281,6 +297,12 @@ export function validateUtilityRouting(routing: unknown, label: string): Utility
     if (entry.subscription === true) normalized.subscription = true;
     if (typeof entry.enabled === "boolean") normalized.enabled = entry.enabled;
     if (entry.escalationOnly === true) normalized.escalationOnly = true;
+    if (entry.qualityTier !== undefined) {
+      if (typeof entry.qualityTier !== "number" || !Number.isFinite(entry.qualityTier)) {
+        throw new Error(`${label}: models[${index}].qualityTier must be a finite number`);
+      }
+      normalized.qualityTier = entry.qualityTier;
+    }
     return normalized;
   });
   return {
@@ -534,49 +556,48 @@ export async function persistActiveProfile(root: string, config: RouterConfig, p
   }
 }
 
-function classify(request: RouteRequest): RouteDecision["classification"] {
+export function classifyTaskSlice(request: RouteRequest): RouteDecision["classification"] {
   const text = `${request.title}\n${request.prompt}`.toLowerCase();
-  const role: RouteRole = request.profile === "reviewer" || request.profile.startsWith("critique-") ? "reviewer" : request.mode === "write" ? "builder" : "scout";
-  let complexity: RouteComplexity = request.complexity ?? (request.mode === "read" ? "small" : "medium");
-  if (!request.complexity) {
+  const role: RouteRole = request.slice?.role ?? (request.profile === "reviewer" || request.profile.startsWith("critique-") ? "reviewer" : request.mode === "write" ? "builder" : "scout");
+  let complexity: RouteComplexity = request.slice?.complexity ?? request.complexity ?? (request.mode === "read" ? "small" : "medium");
+  if (!request.slice?.complexity && !request.complexity) {
     if (/\b(typo|rename|format|copy|locate|find|list)\b/.test(text)) complexity = "tiny";
     if (/\b(architecture|migration|concurrency|distributed|security|authentication|refactor)\b/.test(text)) complexity = "large";
     else if (text.length > 1800 || /\b(multiple files|cross-cutting|integration)\b/.test(text)) complexity = "medium";
   }
-  let risk: RouteRisk = request.risk ?? "low";
-  if (!request.risk) {
+  let risk: RouteRisk = request.slice?.risk ?? request.risk ?? "low";
+  if (!request.slice?.risk && !request.risk) {
     if (/\b(auth|security|permission|payment|billing|production|data loss|migration)\b/.test(text)) risk = "high";
     else if (request.mode === "write" || /\b(api|schema|database)\b/.test(text)) risk = "medium";
   }
-  return { complexity, risk, role };
+  const kind = request.slice?.kind
+    ?? (/\b(architecture|architectural)\b/.test(text) ? "architecture"
+      : /\b(auth|security|permission)\b/.test(text) ? "security"
+      : /\b(integration|cross-cutting)\b/.test(text) ? "integration"
+      : /\b(ui|frontend|component|css)\b/.test(text) ? "ui"
+      : /\b(test|spec|fixture)\b/.test(text) ? "test"
+      : /\b(maintenance|typo|rename|format)\b/.test(text) ? "maintenance" : "general");
+  return { complexity, risk, role, kind };
 }
 
-function requiredQuality(c: RouteDecision["classification"], attempt: number): number {
+function requiredQuality(c: RouteDecision["classification"]): number {
   const complexity = { tiny: 0.6, small: 0.68, medium: 0.82, large: 0.91 }[c.complexity];
   const risk = { low: 0, medium: 0.05, high: 0.09 }[c.risk];
-  return Math.min(0.98, complexity + risk + Math.min(0.12, Math.max(0, attempt - 1) * 0.06));
+  return Math.min(0.98, complexity + risk);
 }
 
 function scoreUtility(
   routing: UtilityRouting,
-  role: RouteRole,
+  classification: RouteDecision["classification"],
   minimum: number,
-  prefer: RouteRequest["prefer"],
+  escalation?: RouteRequest["escalation"],
 ): { selected?: { model: string; score: number; quality: number; speed: number; effectiveCost: number; eligible: boolean }; candidates: RouteDecision["candidates"]; reason: string } {
-  const preference = prefer ?? "balanced";
-  const multiplier = preference === "cost" ? { cost: 1.5, speed: 0.7, quality: 0.8 }
-    : preference === "speed" ? { cost: 0.8, speed: 1.6, quality: 0.8 }
-    : preference === "quality" ? { cost: 0.6, speed: 0.7, quality: 1.7 }
-    : { cost: 1, speed: 1, quality: 1 };
-
   const candidates = routing.models
-    .filter((model) => model.enabled !== false && model.roles.includes(role))
+    .filter((model) => model.enabled !== false && model.roles.includes(classification.role))
     .map((model) => {
       const effectiveCost = Math.min(1, model.relativeCost + (model.subscription ? routing.subscriptionScarcityPenalty : 0));
       const eligible = model.quality >= minimum;
-      const score = routing.weights.quality * multiplier.quality * model.quality
-        + routing.weights.speed * multiplier.speed * model.speed
-        + routing.weights.cost * multiplier.cost * (1 - effectiveCost);
+      const score = (1 - effectiveCost) + model.speed / 10 + model.quality / 100;
       return {
         model: model.model,
         eligible,
@@ -585,14 +606,21 @@ function scoreUtility(
         speed: model.speed,
         effectiveCost,
         escalationOnly: model.escalationOnly === true,
+        tier: model.qualityTier ?? model.quality,
       };
     })
-    .sort((a, b) => b.score - a.score);
+    .sort((a, b) => a.effectiveCost - b.effectiveCost || b.speed - a.speed || a.model.localeCompare(b.model));
 
-  const primaryEligible = candidates.filter((candidate) => candidate.eligible && !candidate.escalationOnly);
-  const escalationEligible = candidates.filter((candidate) => candidate.eligible && candidate.escalationOnly);
-  const selectedFull = primaryEligible[0] ?? escalationEligible.sort((a, b) => b.quality - a.quality)[0]
-    ?? candidates.slice().sort((a, b) => b.quality - a.quality)[0];
+  const reserved = classification.risk === "high" && ["architecture", "security", "integration"].includes(classification.kind);
+  const diagnosis = escalation?.diagnosis;
+  const previous = escalation?.previousModel ? candidates.find((candidate) => candidate.model === escalation.previousModel) : undefined;
+  const eligible = candidates.filter((candidate) => candidate.eligible && (!candidate.escalationOnly || reserved || diagnosis));
+  const abovePrevious = diagnosis && previous ? eligible.filter((candidate) => candidate.tier > previous.tier) : eligible;
+  const eligibleForSelection = abovePrevious.length ? abovePrevious : eligible;
+  const highestTier = eligibleForSelection.reduce((tier, candidate) => Math.max(tier, candidate.tier), -Infinity);
+  const selectedFull = reserved
+    ? eligibleForSelection.filter((candidate) => candidate.tier === highestTier)[0]
+    : eligibleForSelection[0] ?? candidates.filter((candidate) => !candidate.escalationOnly)[0] ?? candidates[0];
 
   const publicCandidates = candidates.map(({ model, eligible, score, quality, speed, effectiveCost }) => ({
     model, eligible, score, quality, speed, effectiveCost,
@@ -602,13 +630,15 @@ function scoreUtility(
     return { candidates: publicCandidates, reason: "No enabled model supports this role; using Pi's default model." };
   }
 
-  const viaEscalation = selectedFull.escalationOnly && primaryEligible.length === 0;
+  const diagnosedEscalation = Boolean(diagnosis && previous && selectedFull.tier > previous.tier);
   return {
     selected: selectedFull,
     candidates: publicCandidates,
-    reason: viaEscalation
-      ? `Escalated ${role} to ${selectedFull.model} because no primary model met quality >= ${minimum.toFixed(2)} (active profile utility routing).`
-      : `Selected the highest utility eligible ${role} (quality >= ${minimum.toFixed(2)}) under the active profile; subscription models include a scarcity penalty.`,
+    reason: diagnosedEscalation
+      ? `Escalated ${classification.role} from ${previous!.model} to ${selectedFull.model} after ${diagnosis!.category}: ${diagnosis!.reason}`
+      : reserved
+        ? `Selected the highest configured quality tier for high-risk ${classification.kind} ${classification.role} work.`
+        : `Selected the cheapest eligible ${classification.role} (quality >= ${minimum.toFixed(2)}) under the active profile.`,
   };
 }
 
@@ -618,8 +648,8 @@ export function routeTask(
   explicitModel?: string,
   explicitThinking?: string,
 ): RouteDecision {
-  const classification = classify(request);
-  const minimum = requiredQuality(classification, request.attempt);
+  const classification = classifyTaskSlice(request);
+  const minimum = requiredQuality(classification);
   const activeProfileName = "activeProfile" in config ? config.activeProfile : undefined;
 
   if (explicitModel) {
@@ -658,7 +688,7 @@ export function routeTask(
       subscriptionScarcityPenalty: config.subscriptionScarcityPenalty,
       models: config.models,
     };
-    const result = scoreUtility(routing, classification.role, minimum, request.prefer);
+    const result = scoreUtility(routing, classification, minimum, request.escalation);
     const thinking = minimum >= 0.95 ? "high" : minimum >= 0.87 ? "medium" : minimum >= 0.78 ? "low" : "minimal";
     return {
       schemaVersion: 1,
@@ -669,6 +699,9 @@ export function routeTask(
       classification,
       requiredQuality: minimum,
       reason: result.reason,
+      escalation: request.escalation?.diagnosis && request.escalation.previousModel !== result.selected?.model
+        ? { previousModel: request.escalation.previousModel, diagnosis: request.escalation.diagnosis }
+        : undefined,
       candidates: result.candidates,
     };
   }
@@ -706,7 +739,7 @@ export function routeTask(
     };
   }
 
-  const result = scoreUtility(profile.routing, classification.role, minimum, request.prefer);
+  const result = scoreUtility(profile.routing, classification, minimum, request.escalation);
   const thinking = minimum >= 0.95 ? "high" : minimum >= 0.87 ? "medium" : minimum >= 0.78 ? "low" : "minimal";
   return {
     schemaVersion: 1,
@@ -718,6 +751,9 @@ export function routeTask(
     classification,
     requiredQuality: minimum,
     reason: `${result.reason} [profile=${profile.name}]`,
+    escalation: request.escalation?.diagnosis && request.escalation.previousModel !== result.selected?.model
+      ? { previousModel: request.escalation.previousModel, diagnosis: request.escalation.diagnosis }
+      : undefined,
     candidates: result.candidates,
   };
 }

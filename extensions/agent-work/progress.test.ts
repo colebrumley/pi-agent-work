@@ -9,6 +9,8 @@ import {
   getActiveOperation,
   ProgressMonitor,
   readProgressTimeline,
+  DEFAULT_STALL_MS,
+  deriveProgressLiveness,
   type ProgressClock,
 } from "./progress.ts";
 import { runPi } from "./runner.ts";
@@ -90,12 +92,15 @@ async function deterministicMonitorTests(): Promise<void> {
     assert.equal(delivered.some((event) => event.kind === "stall"), false);
     assert.equal(JSON.stringify(delivered).includes("private reasoning"), false);
 
-    await clock.tick(60_000);
+    await clock.tick(DEFAULT_STALL_MS - 21_001);
+    await monitor.flush();
+    assert.equal(livenessChecks, 0, "default liveness remains active until ten silent minutes");
+    await clock.tick(1);
     await monitor.flush();
     assert.equal(livenessChecks, 1);
     assert.equal(delivered.some((event) => event.kind === "stall"), true);
     assert.match(formatProgress(delivered.find((event) => event.kind === "stall")!), /inactive.*No structured output/);
-    await clock.tick(60_000);
+    await clock.tick(DEFAULT_STALL_MS);
     await monitor.flush();
     assert.equal(livenessChecks, 2, "stall warning repeats every inactivity interval");
     monitor.observe({ type: "tool_execution_start", toolName: "read", args: { path: "/tmp/secret.env" } });
@@ -173,8 +178,15 @@ async function degradationConcurrencyAndCancellationTests(): Promise<void> {
     assert.equal(clock.timers.size, 0);
 
     const silent = await ProgressMonitor.start(base(root, clock, "no-default-timeout"));
-    await clock.tick(180_000);
+    await clock.tick(DEFAULT_STALL_MS - 1);
     await silent.flush();
+    assert.equal(silent.isStalled, false);
+    await clock.tick(1);
+    await silent.flush();
+    assert.equal(silent.isStalled, true, "silence becomes visibly stalled at exactly ten minutes without aborting");
+    silent.observe({ type: "heartbeat" });
+    await silent.flush();
+    assert.equal(silent.isStalled, false, "child heartbeat clears the stalled condition");
     assert.equal(silent.isTerminal, false, "silence alone never aborts and no timeout exists by default");
     await silent.cancel();
 
@@ -210,6 +222,15 @@ async function degradationConcurrencyAndCancellationTests(): Promise<void> {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+
+// Timeline reconstruction is pure and idempotent across restart/reprocessing.
+{
+  const progress = [0, 120_000, 599_999];
+  assert.deepEqual(deriveProgressLiveness(progress, 1_199_999), deriveProgressLiveness(progress, 1_199_999));
+  assert.equal(deriveProgressLiveness(progress, 1_199_998).stalled, false);
+  assert.equal(deriveProgressLiveness(progress, 1_199_999).stalled, true);
+  assert.equal(deriveProgressLiveness([...progress, 1_200_000], 1_200_000).stalled, false, "new output resumes liveness");
 }
 
 async function realChildSmokeTest(): Promise<void> {
