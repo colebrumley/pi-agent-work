@@ -46,6 +46,7 @@ export interface ProgressMonitorOptions {
   root: string;
   featureId: string;
   taskId: string;
+  taskLabel?: string;
   attempt: number;
   operationId: string;
   operation: ProgressOperationKind;
@@ -68,6 +69,12 @@ interface ActiveOperation {
 }
 
 const activeOperations = new Map<string, ActiveOperation>();
+const progressListeners = new Set<(event: ProgressEvent) => void>();
+
+export function subscribeProgress(listener: (event: ProgressEvent) => void): () => void {
+  progressListeners.add(listener);
+  return () => progressListeners.delete(listener);
+}
 
 export function progressFile(root: string, operationId: string): string {
   return join(rootDir(root), "progress", `${operationId.replace(/[^a-zA-Z0-9._-]+/g, "-")}.jsonl`);
@@ -207,6 +214,7 @@ export class ProgressMonitor {
       timestamp: new Date(timestampMs).toISOString(),
       featureId: this.options.featureId,
       taskId: this.options.taskId,
+      taskLabel: this.options.taskLabel ? sanitizeSummary(this.options.taskLabel) : undefined,
       attempt: this.options.attempt,
       operationId: this.options.operationId,
       operation: this.options.operation,
@@ -344,6 +352,7 @@ export class ProgressMonitor {
       timestamp: new Date(timestampMs).toISOString(),
       featureId: this.options.featureId,
       taskId: this.options.taskId,
+      taskLabel: this.options.taskLabel ? sanitizeSummary(this.options.taskLabel) : undefined,
       attempt: this.options.attempt,
       operationId: this.options.operationId,
       operation: this.options.operation,
@@ -359,6 +368,9 @@ export class ProgressMonitor {
     const operation = async () => {
       event.deliveryDegraded = this.deliveryFailed || undefined;
       await appendJsonl(this.file, event);
+      for (const listener of progressListeners) {
+        try { listener(event); } catch { /* UI observers are best effort and never block progress persistence. */ }
+      }
       if (this.options.onDelivery) {
         try {
           const delivery = this.options.onDelivery(event);

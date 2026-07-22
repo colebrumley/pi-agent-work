@@ -3,7 +3,7 @@ export const SCHEMA_VERSION = 1;
 export type TaskMode = "read" | "write";
 export type TaskState = "pending" | "running" | "stalled" | "review" | "done" | "blocked" | "failed" | "cancelled" | "integrated";
 export type ProgressOperationKind = "delegation" | "review" | "verification" | "follow-up" | "integration";
-export type ProgressTerminalState = "success" | "failure" | "timeout" | "cancelled" | "unreachable";
+export type ProgressTerminalState = "success" | "failure" | "timeout" | "cancelled" | "unreachable" | "blocked";
 
 export interface ProgressCounts {
   completed: number;
@@ -17,6 +17,7 @@ export interface ProgressEvent {
   timestamp: string;
   featureId: string;
   taskId: string;
+  taskLabel?: string;
   attempt: number;
   operationId: string;
   operation: ProgressOperationKind;

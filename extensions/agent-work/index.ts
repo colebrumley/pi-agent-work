@@ -89,6 +89,7 @@ import {
   writeStatus,
 } from "./storage.ts";
 import { registerStatusFooter } from "./status-footer.ts";
+import { registerAgentStatusUi } from "./agent-status-ui.ts";
 import { SCHEMA_VERSION, type Handoff, type InvocationRecord, type ProgressEvent, type ProgressOperationKind, type SessionReference, type TaskMode, type TaskRecord } from "./types.ts";
 import { loadState } from "../../requirements/src/state.ts";
 import { integrationBlockers, rerunAcceptanceTests, sanitizeSummary, validateBuilderEvidence, writeVerificationReport, type BuilderEvidence, type VerificationFinding, type VerificationReport } from "./verification.ts";
@@ -409,6 +410,7 @@ async function runTask(
     root,
     featureId,
     taskId,
+    taskLabel: task.title,
     attempt,
     operationId: currentOperationId,
     operation: kind,
@@ -676,7 +678,7 @@ async function runTask(
     });
     await settleRouteOutcome(root, route, featureId, taskId, attempt, status.state);
     await writeIntegrityManifest(root, { featureId, taskId, attempt });
-    await monitor.terminal(handoff.status === "done" ? "success" : "failure", handoff.status === "done" ? "Task completed" : `Task reported ${handoff.status}`);
+    await monitor.terminal(handoff.status === "done" ? "success" : handoff.status === "blocked" ? "blocked" : "failure", handoff.status === "done" ? "Task completed" : `Task reported ${handoff.status}`);
     return {
       receipt: finalReceipt({ featureId, taskId, attempt, state: status.state, attemptPath, sessionFile, commit, summary: handoff.summary }),
       finalText: run.finalText || handoff.summary,
@@ -912,6 +914,7 @@ let activeSessionId: string | undefined;
 
 export default function agentWorkExtension(pi: ExtensionAPI) {
   registerStatusFooter(pi);
+  registerAgentStatusUi(pi);
 
   pi.registerFlag("agent-profile", {
     description: "Activate a named agent-work model profile (coordinator + delegated routing)",

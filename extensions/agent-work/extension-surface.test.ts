@@ -12,6 +12,7 @@ const commands: any[] = [];
 const events: string[] = [];
 const api = {
   registerFlag() {}, registerTool(tool: any) { tools.push(tool); }, registerCommand(name: string) { commands.push(name); },
+  registerEntryRenderer() {},
   on(name: string) { events.push(name); }, getFlag() { return undefined; }, setModel() {},
 };
 agentWorkExtension(api as any);
