@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export type ReviewMode = "broad" | "focused" | "final-gate" | "none";
-export type ChangedSurfaceKind = "architecture" | "trust-security-boundary" | "public-contract" | "acceptance-scope";
+export type ChangedSurfaceKind = "architecture" | "trust-security-boundary" | "public-contract" | "acceptance-scope" | "data-migration" | "concurrency" | "uncertain";
 
 export interface ChangedSurface {
   files: string[];
@@ -72,14 +72,17 @@ export function classifyChangedSurface(input: {
 /** Conservative bounded-diff classifier. It never reads unrelated repository history. */
 export function classifyChangedSurfaceFromDiff(input: { files: string[]; diff: string; affectedRequirementIds?: string[] }): ChangedSurface {
   const text = `${input.files.join("\n")}\n${input.diff}`.toLowerCase();
-  return classifyChangedSurface({
-    files: input.files,
-    affectedRequirementIds: input.affectedRequirementIds,
-    architectureChanged: /(^|\n)(src|extensions|lib)\/.*(router|lifecycle|storage|schema|migration|architecture)|\b(architecture|migration|concurrency|persistence)\b/.test(text),
-    trustSecurityBoundaryChanged: /\b(auth|authoriz|permission|credential|secret|token|security|trust.boundary)\b/.test(text),
-    publicContractChanged: /\b(public|export|api|endpoint|contract|schema|cli|registertool|parameters)\b/.test(text),
-    acceptanceScopeExpanded: /\b(acceptance|acceptancecriteria|acceptancetests|at-[a-z0-9_-]+)\b/.test(text),
-  });
+  const diffText = input.diff.toLowerCase();
+  const kinds = new Set<ChangedSurfaceKind>();
+  if (/(^|\n)(src|extensions|lib)\/.*(router|lifecycle|storage|architecture)|\b(architecture|persistence)\b/.test(text)) kinds.add("architecture");
+  if (/\b(auth(?:entication|orization)?|authoriz|permission|credential|secret|token|security|trust[-_. ]?boundary|crypto(?:graphy)?|private[-_ ]?key|public[-_ ]?key|certificate|cert)\b/.test(text)) kinds.add("trust-security-boundary");
+  if (/\b(public|export|api|endpoint|contract|cli|registertool|parameters)\b/.test(text)) kinds.add("public-contract");
+  if (/\b(acceptance|acceptancecriteria|acceptancetests|at-[a-z0-9_-]+)\b/.test(text)) kinds.add("acceptance-scope");
+  if (input.files.some((file) => /(?:^|\/)(?:migrations?|schema)(?:\/|\.|$)|\.sql$/i.test(file)) || /\b(alter|create|drop)\s+(?:table|index|column)\b|\bschema migration\b/.test(text)) kinds.add("data-migration");
+  if (/\b(lock|mutex|atomic|thread|concurren|semaphore|race[-_ ]?condition)\b/.test(diffText) || input.files.some((file) => !/(?:package-lock\.json|yarn\.lock)$/i.test(file) && /\b(?:lock|mutex|atomic|thread|concurren)/i.test(file))) kinds.add("concurrency");
+  const knownLowRisk = input.files.length > 0 && input.files.every((file) => /(?:^|\/)(?:docs?|test|tests|__tests__)\/|\.(?:md|mdx|txt)$|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|\.gitignore)$/i.test(file));
+  if (!kinds.size && !knownLowRisk) kinds.add("uncertain");
+  return { files: [...new Set(input.files)].sort(), affectedRequirementIds: [...new Set(input.affectedRequirementIds ?? [])].sort(), kinds: [...kinds] };
 }
 
 export function reviewPlan(state: ReviewLifecycleState, request: ReviewRequest): ReviewPlan {

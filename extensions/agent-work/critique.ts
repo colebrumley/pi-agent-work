@@ -34,9 +34,21 @@ function normalizeSeverity(value: string): Severity | undefined {
 }
 
 export function parseFindings(text: string, perspective: string): CritiqueFinding[] {
+  const trimmed = text.trim();
+  try {
+    const value = JSON.parse(trimmed) as { findings?: unknown };
+    if (!Array.isArray(value.findings)) throw new Error("reviewer JSON must include an explicit findings array");
+    return value.findings.map((item: any, index) => {
+      if (!item || !SEVERITY_ORDER.includes(item.severity) || typeof item.category !== "string" || typeof item.location !== "string" || typeof item.description !== "string" || !item.category.trim() || !item.location.trim() || !item.description.trim()) throw new Error(`reviewer finding ${index + 1} is malformed`);
+      return { severity: item.severity, category: item.category.trim(), location: item.location.trim(), description: item.description.trim(), ...(typeof item.impact === "string" ? { impact: item.impact.trim() } : {}), ...(typeof item.recommendation === "string" ? { recommendation: item.recommendation.trim() } : {}), perspectives: [perspective] };
+    });
+  } catch (error: any) {
+    if (!trimmed.startsWith("LEGACY_MARKDOWN\n")) throw new Error(`reviewer structured handoff refused: ${error?.message ?? "malformed JSON"}`);
+  }
+  const legacy = trimmed.slice("LEGACY_MARKDOWN\n".length);
   const findings: CritiqueFinding[] = [];
   let severity: Severity | undefined;
-  const lines = text.split(/\r?\n/);
+  const lines = legacy.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const heading = lines[i].match(/^###\s+(Critical|High|Medium|Low)\s+Findings/i);
     if (heading) {

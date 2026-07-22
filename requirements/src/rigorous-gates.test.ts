@@ -6,7 +6,7 @@ import { newState, migrateState, requirementsRevision } from "./state.ts";
 import { validateRequirements } from "./validate-requirements.ts";
 import { renderHandoff } from "./render-handoff.ts";
 import { ADVERSARIAL_CATEGORIES, FIDELITY_LAYERS, READINESS_DOMAINS, type RequirementsState, type Tier } from "./types.ts";
-import { integrationBlockers, rerunAcceptanceTests, sanitizeSummary, validateBuilderEvidence } from "../../extensions/agent-work/verification.ts";
+import { assessFidelityLayers, finalWorkspaceBlockers, integrationBlockers, rerunAcceptanceTests, sanitizeSummary, validateBuilderEvidence } from "../../extensions/agent-work/verification.ts";
 
 function complete(tier: Tier): RequirementsState {
   const s = newState("Ready feature", tier);
@@ -132,6 +132,14 @@ for (const tier of ["tiny", "small", "medium", "large", "epic"] as Tier[]) {
   const progress: string[] = [];
   const rerun = await rerunAcceptanceTests(s, checked.evidence!, process.cwd(), "abc", [], { onProgress: (item) => { progress.push(`${item.testId}:${item.status}`); } });
   assert.equal(rerun.approved, true);
+  assert.deepEqual(assessFidelityLayers(s, rerun.tests).blockers, [], "applicable fidelity has corresponding passing acceptance evidence and unavailable layers retain rationale");
+  const missingLayer = structuredClone(s);
+  missingLayer.testingStandards.fidelity.find((item) => item.name === "integration")!.applicable = true;
+  missingLayer.testingStandards.fidelity.find((item) => item.name === "integration")!.rationale = "Integration boundary is required";
+  assert.ok(assessFidelityLayers(missingLayer, rerun.tests).blockers.some((item) => /integration/.test(item)), "aggregate test success cannot manufacture evidence for another applicable fidelity layer");
+  assert.deepEqual(finalWorkspaceBlockers("a", "a", ""), []);
+  assert.ok(finalWorkspaceBlockers("a", "a", " M source.ts\n").some((item) => /dirty/.test(item)), "dirty worktrees cannot attribute final evidence to HEAD");
+  assert.ok(finalWorkspaceBlockers("a", "b", "").some((item) => /HEAD/.test(item)), "stale HEAD cannot receive final evidence");
   assert.deepEqual(progress, ["at-1:running", "at-1:passed"], "independent acceptance reruns expose durable progress milestones");
   const failed = structuredClone(evidence); failed.tests[0].result = "failed";
   assert.equal((await validateBuilderEvidence(s, failed, "abc")).valid, false, "failed required evidence blocks completion");

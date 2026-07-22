@@ -10,7 +10,6 @@ export interface WorkflowConfig {
   liveness?: { inactivityMs?: number; hardTimeoutMs?: number };
   retention?: RetentionPolicyOverrides;
   cleanup?: { retainWorktree?: boolean };
-  compatibility?: { allowHighRiskWithoutFinalGate?: boolean };
 }
 
 export type WorkflowOverrides = Omit<WorkflowConfig, "schemaVersion">;
@@ -39,11 +38,10 @@ export function validateWorkflowConfig(raw: unknown): WorkflowConfig {
     validateBoolean(value.retention.compaction, "retention.compaction");
   }
   validateBoolean(value.cleanup?.retainWorktree, "cleanup.retainWorktree");
-  validateBoolean(value.compatibility?.allowHighRiskWithoutFinalGate, "compatibility.allowHighRiskWithoutFinalGate");
   return value;
 }
 export async function loadWorkflowConfig(root: string, override: WorkflowOverrides = {}): Promise<WorkflowConfig> {
   const path = workflowConfigPath(root);
   const repository = await exists(path) ? validateWorkflowConfig(JSON.parse(await readFile(path, "utf8"))) : { schemaVersion: 1 };
-  return validateWorkflowConfig({ ...repository, ...override, schemaVersion: 1, review: { ...repository.review, ...override.review }, routing: { ...repository.routing, ...override.routing }, liveness: { ...repository.liveness, ...override.liveness }, retention: { ...repository.retention, ...override.retention }, cleanup: { ...repository.cleanup, ...override.cleanup }, compatibility: { ...repository.compatibility, ...override.compatibility } });
+  return validateWorkflowConfig({ ...repository, ...override, schemaVersion: 1, review: { ...repository.review, ...override.review }, routing: { ...repository.routing, ...override.routing }, liveness: { ...repository.liveness, ...override.liveness }, retention: { ...repository.retention, ...override.retention }, cleanup: { ...repository.cleanup, ...override.cleanup } });
 }

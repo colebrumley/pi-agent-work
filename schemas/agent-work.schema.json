@@ -17,6 +17,8 @@
     { "$ref": "#/$defs/verificationReport" },
     { "$ref": "#/$defs/runGraph" },
     { "$ref": "#/$defs/runState" },
+    { "$ref": "#/$defs/integrationAttempt" },
+    { "$ref": "#/$defs/directFinalGate" },
     { "$ref": "#/$defs/reflectionReport" },
     { "$ref": "#/$defs/reflectionProposal" }
   ],
@@ -64,7 +66,10 @@
           "properties": {
             "id": { "type": "string" }, "featureId": { "type": "string" }, "title": { "type": "string" }, "prompt": { "type": "string" },
             "mode": { "enum": ["read", "write"] }, "profile": { "type": "string" },
-            "dependsOn": { "type": "array", "items": { "type": "string" } }, "createdAt": { "type": "string", "format": "date-time" }
+            "dependsOn": { "type": "array", "items": { "type": "string" } },
+            "affectedAcceptanceTestIds": { "type": "array", "minItems": 1, "items": { "type": "string" }, "uniqueItems": true },
+            "acceptanceChecks": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "required": ["testId", "command"], "properties": { "testId": { "type": "string" }, "command": { "type": "string" } } } },
+            "createdAt": { "type": "string", "format": "date-time" }
           }
         }
       ]
@@ -205,7 +210,11 @@
         "concurrency": { "type": "integer", "minimum": 1 },
         "tasks": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "type": "object", "required": ["id", "title", "prompt", "mode", "dependsOn"], "properties": {
           "id": { "type": "string", "maxLength": 80 }, "title": { "type": "string", "maxLength": 500 }, "prompt": { "type": "string", "maxLength": 40000 },
-          "mode": { "enum": ["read", "write"] }, "profile": { "type": "string" }, "dependsOn": { "type": "array", "items": { "type": "string" } }
+          "mode": { "enum": ["read", "write"] }, "profile": { "type": "string" }, "dependsOn": { "type": "array", "items": { "type": "string" } },
+          "outcome": { "type": "string", "minLength": 1 }, "surface": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "string", "minLength": 1 } },
+          "nonGoals": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }, "verificationCommands": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+          "checkpoint": { "type": "string" }, "checkpointOutcome": { "type": "string" }, "checkpointSurface": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "string" } },
+          "reviewTriggers": { "type": "array", "items": { "enum": ["public-contract", "architecture", "security-trust-boundary", "data-migration", "concurrency", "expanded-acceptance-scope", "uncertain"] } }, "affectedAcceptanceTestIds": { "type": "array", "items": { "type": "string" } }, "acceptanceChecks": { "type": "array", "items": { "type": "object", "required": ["testId", "command"], "properties": { "testId": { "type": "string" }, "command": { "type": "string" } } } }
         } } }
       }
     },
@@ -221,8 +230,31 @@
           "stageAttempt": { "type": "integer", "minimum": 0 }, "retryCount": { "type": "integer", "minimum": 0 }, "durationMs": { "type": "number", "minimum": 0 }, "cost": { "type": "number", "minimum": 0 }, "corrections": { "type": "integer", "minimum": 0 }
         } } },
         "integrationOrder": { "type": "array", "items": { "type": "string" } }, "integrated": { "type": "array", "items": { "type": "string" } },
+        "checkpoints": { "type": "object", "additionalProperties": { "type": "object", "required": ["members", "finalTaskId", "outcome", "allowedSurface", "reviewMode", "reviewRationale"], "properties": { "members": { "type": "array", "items": { "type": "string" } }, "finalTaskId": { "type": "string" }, "outcome": { "type": "string" }, "allowedSurface": { "type": "array", "items": { "type": "string" } }, "reviewMode": { "enum": ["focused", "broad"] }, "reviewRationale": { "type": "string" }, "affectedAcceptanceTestIds": { "type": "array", "items": { "type": "string" } } } } },
+        "cancellationRequested": { "type": "boolean" }, "combinedCoordinatorCommit": { "type": "string" }, "finalGate": { "type": "object", "required": ["status"], "properties": { "status": { "enum": ["pending", "running", "passed", "blocked"] }, "reportPath": { "type": "string" }, "reason": { "type": "string" } } },
         "reflection": { "type": "object", "required": ["status", "attempt"], "properties": { "status": { "enum": ["not-started", "pending", "complete", "skipped", "failed"] }, "attempt": { "type": "integer", "minimum": 0 }, "path": { "type": "string" } } },
         "createdAt": { "type": "string", "format": "date-time" }, "updatedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "integrationAttempt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "status", "sourceCommit", "preIntegrationCommit", "updatedAt"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "status": { "enum": ["running", "blocked", "applied"] },
+        "sourceCommit": { "type": "string" }, "preIntegrationCommit": { "type": "string" }, "coordinatorCommit": { "type": "string" }, "patchEquivalentCommit": { "type": "string" },
+        "reason": { "type": "string" }, "retryGuidance": { "type": "string" }, "updatedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "directFinalGate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "status", "requirementsRevision", "sourceCommit", "preIntegrationCommit", "canonicalMappings", "updatedAt"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "status": { "enum": ["pending", "running", "passed", "blocked"] },
+        "requirementsRevision": { "type": "string" }, "sourceCommit": { "type": "string" }, "preIntegrationCommit": { "type": "string" }, "coordinatorCommit": { "type": "string" },
+        "canonicalMappings": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "required": ["testId", "command"], "properties": { "testId": { "type": "string" }, "command": { "type": "string" } } } },
+        "reportRef": { "type": "object", "additionalProperties": false, "required": ["path", "commit"], "properties": { "path": { "type": "string" }, "commit": { "type": "string" } } },
+        "manifestRef": { "type": "object", "additionalProperties": false, "required": ["path", "sha256", "commit"], "properties": { "path": { "type": "string" }, "sha256": { "type": "string" }, "commit": { "type": "string" } } },
+        "retryGuidance": { "type": "string" }, "reason": { "type": "string" }, "updatedAt": { "type": "string", "format": "date-time" }
       }
     },
     "reflectionReport": {

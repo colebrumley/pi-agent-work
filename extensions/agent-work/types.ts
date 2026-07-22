@@ -53,6 +53,9 @@ export interface TaskRecord {
   mode: TaskMode;
   profile: string;
   dependsOn: string[];
+  /** Coordinator-owned direct-lifecycle acceptance scope and canonical commands. */
+  affectedAcceptanceTestIds?: string[];
+  acceptanceChecks?: Array<{ testId: string; command: string }>;
   createdAt: string;
 }
 

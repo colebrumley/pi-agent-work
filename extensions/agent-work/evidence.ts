@@ -19,7 +19,13 @@ export interface EvidenceRecord {
   scenarios: AdversarialCategory[];
   freshness: EvidenceFreshness;
   lineage?: { sourceEvidenceId: string; sourceCommit: string };
+  /** Immutable targeted-turn binding retained when later checkpoint/final records aggregate it. */
+  sourceStateHash?: string;
+  sourceTurnId?: string;
+  sourceCheckpointId?: string;
   overrideRationale?: string;
+  /** Exact declared layer assessment retained even when result is not-run. */
+  declaredStatus?: "passed" | "approved-unavailable" | "missing";
 }
 
 export interface EvidenceManifest {
@@ -28,6 +34,15 @@ export interface EvidenceManifest {
   commit: string;
   records: EvidenceRecord[];
   manifestHash: string;
+}
+
+export function canonicalAcceptanceProvenance(
+  acceptanceTests: readonly Array<{ id: string; fidelityLayer: FidelityLayer; categories: AdversarialCategory[] }>,
+  testId: string,
+): { recordId: string; fidelity: FidelityLayer; scenarios: AdversarialCategory[] } {
+  const acceptanceTest = acceptanceTests.find((item) => item.id === testId);
+  if (!acceptanceTest) throw new Error(`Cannot create canonical evidence record for unknown acceptance test ${testId}`);
+  return { recordId: testId, fidelity: acceptanceTest.fidelityLayer, scenarios: [...acceptanceTest.categories] };
 }
 
 export function commandIdentity(command: string): string {

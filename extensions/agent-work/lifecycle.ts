@@ -69,7 +69,7 @@ export async function reconcileCbpiLifecycle(project: string, input: { dryRun?: 
   return outcomes;
 }
 
-async function stablePatchId(project: string, commit: string): Promise<string | undefined> {
+export async function stablePatchId(project: string, commit: string): Promise<string | undefined> {
   try {
     const patch = await git(project, ["diff-tree", "--no-commit-id", "--patch", commit]);
     return await new Promise<string | undefined>((resolvePatch, reject) => {
@@ -85,9 +85,17 @@ async function stablePatchId(project: string, commit: string): Promise<string | 
   } catch { return undefined; }
 }
 
-async function gitPatchEquivalent(project: string, coordinatorCommit: string, sourceCommit: string): Promise<boolean> {
+export async function gitPatchEquivalent(project: string, coordinatorCommit: string, sourceCommit: string): Promise<boolean> {
   const [coordinatorPatch, sourcePatch] = await Promise.all([stablePatchId(project, coordinatorCommit), stablePatchId(project, sourceCommit)]);
   return Boolean(sourcePatch && coordinatorPatch && sourcePatch === coordinatorPatch);
+}
+
+export async function findPatchEquivalentAncestor(project: string, sourceCommit: string, maximum = 200): Promise<string | undefined> {
+  const sourcePatch = await stablePatchId(project, sourceCommit);
+  if (!sourcePatch) return undefined;
+  const commits = (await git(project, ["log", `--max-count=${maximum}`, "--format=%H", "HEAD"])).split(/\r?\n/).filter(Boolean);
+  for (const commit of commits) if (await stablePatchId(project, commit) === sourcePatch) return commit;
+  return undefined;
 }
 
 /** Collection binds the reviewed source patch to the exact coordinator commit created by integration. */
